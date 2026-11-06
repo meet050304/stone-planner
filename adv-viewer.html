@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADV Stone Viewer</title>
+<link rel="stylesheet" href="viewer/viewer.css">
+</head>
+<body>
+<aside>
+  <header>
+    <h1>ADV Stone Viewer</h1>
+    <label class="btn">Open .adv files<input id="pick" type="file" accept=".adv" multiple></label>
+    <button id="bulkPlanTop" style="width:100%;margin-top:6px">Bulk plan</button>
+    <button id="advisorRunTop" style="width:100%;margin-top:6px" title="Advisor makes the final plans: prepare copies, run the script on the Advisor PC, then pick the best save">Advisor run</button>
+    <button id="fillSavesTop" style="width:100%;margin-top:6px" title="For plans with a different stone count: writes each plan from the Output folder into the stone saved again in Advisor with that count">Fill Advisor saves</button>
+  </header>
+  <div id="stones"></div>
+</aside>
+<main id="main">
+      <dialog id="advisorDialog" aria-labelledby="advisorTitle">
+        <h3 id="advisorTitle">Advisor run</h3>
+        <p class="sub">1 Prepare copies here. 2 Run advisor-best-plan on the Advisor PC. 3 Pick the best here.</p>
+        <div class="bulkRow"><span>Stone folder</span><b id="advStone"></b><button data-adv-folder="stone">Choose</button></div>
+        <div class="bulkRow"><span>Work folder</span><b id="advWork"></b><button data-adv-folder="work">Choose</button></div>
+        <div class="bulkRow"><span>Saves folder</span><b id="advSaves"></b><button data-adv-folder="saves">Choose</button></div>
+        <div class="bulkRow"><span>Final folder</span><b id="advFinal"></b><button data-adv-folder="final">Choose</button></div>
+        <div class="bulkRow"><span>Stones</span><input id="advCount" class="num" type="number" min="0" step="1" value="10" title="0 is every stone in the Stone folder" style="grid-column:2/4"></div>
+        <p id="advNote" class="sub" aria-live="polite"></p>
+        <div class="bulkActions"><button id="advCancel">Cancel</button><button id="advPrepare">1 Prepare copies</button><button id="advPick">3 Pick the best</button></div>
+      </dialog>
+      <dialog id="bulkDialog" aria-labelledby="bulkTitle">
+        <h3 id="bulkTitle">Bulk plan</h3>
+        <div id="bulkStep1">
+          <div class="bulkRow"><span>Stone folder</span><b id="bulkStone"></b><button id="bulkChooseStone">Choose</button></div>
+          <div class="bulkRow"><span>Output folder</span><b id="bulkOutput"></b><button id="bulkChooseOutput">Choose</button></div>
+          <div class="bulkRow"><span>Export folder</span><b id="bulkExport"></b><button id="bulkChooseExport">Choose</button></div>
+          <div class="bulkRow"><span>Inclusions</span><select id="bulkPicks" style="grid-column:2/4"><option value="saved">Advisor's inclusion choices</option><option value="auto">Our inclusion choices</option></select></div>
+          <p id="bulkNote" class="sub" aria-live="polite"></p>
+          <div class="bulkActions"><button id="bulkCancel">Cancel</button><button id="bulkNext">Next</button></div>
+        </div>
+        <div id="bulkStep2" hidden>
+          <p class="sub">Check the settings. Planning starts with these values.</p>
+          <div id="bulkLimitsHome"></div>
+          <p id="bulkNote2" class="sub" aria-live="polite"></p>
+          <div class="bulkActions"><button id="bulkBack">Back</button><button id="bulkStart">Start</button></div>
+        </div>
+      </dialog>
+  <div id="bulkReport" hidden></div>
+  <div id="empty"><div><b>Drop .adv files here</b>Files are read in this browser and are not uploaded.</div></div>
+  <div class="wrap" id="view" hidden>
+    <h2 id="title"></h2><p class="sub" id="sub"></p>
+    <div class="stats" id="stats"></div>
+    <div role="tablist">
+      <button role="tab" data-tab="model">3D model</button>
+      <button role="tab" data-tab="limits">Cut limits</button>
+      <button role="tab" data-tab="plan">Cut plan</button>
+      <button role="tab" data-tab="images">Scan images</button>
+      <button role="tab" data-tab="compare">Compare all</button>
+    </div>
+    <section id="tab-model">
+      <div id="details"></div>
+      <div id="stage">
+        <canvas id="gl"></canvas>
+        <div id="scan"><canvas id="photo" width="1024" height="1280" aria-label="Scan image of the stone"></canvas></div>
+        <div class="ctrl">
+          <label><input type="checkbox" id="showStone" checked> Stone</label>
+          <label><input type="checkbox" id="showInc" checked> Inclusions</label>
+          <label><input type="checkbox" id="showIgnored" checked> Ignored</label>
+          <label><input type="checkbox" id="showPlan" checked> Planned stones</label>
+          <label><input type="checkbox" id="spin"> Rotate</label>
+          <div class="rot"><button id="rot360">360°</button><button id="rotH">Horizontal</button></div>
+          <div class="rot"><button id="zoomOut" aria-label="Zoom out">−</button><button id="zoomIn" aria-label="Zoom in">+</button><button id="zoomReset">Reset</button></div>
+          <div class="rot"><button id="hideDiamond" aria-pressed="false">Hide diamond</button><button id="showAll" hidden>Show all</button><button id="sawView">Saw view</button><button id="polishView" aria-pressed="false">Polish</button><button id="insideView" aria-pressed="false">Inside / outside</button><span id="polishStones" hidden></span></div>
+          <div class="rot"><button id="autoPick">Auto select</button><button id="pickMode" aria-pressed="false">Pick inclusions</button><button id="pickAll">Select all</button><button id="pickNone">Ignore all</button></div>
+          <span id="picked"></span>
+          <div class="rot" id="fitButtons" aria-label="Fit stones"><button id="autoPlan">Auto plan</button><span>Fit stones</span><button data-fit="1">1</button><button data-fit="2">2</button><button data-fit="3">3</button><button data-fit="4">4</button><button data-fit="5">5</button><button id="fitClear">Clear</button></div>
+          <div class="rot"><button id="editSaw" aria-pressed="false">Edit saw</button><button id="splitInc" aria-pressed="false">Split inclusion</button></div>
+          <div class="rot"><button id="saveAdv">Save .adv</button><button id="stoneFolder">Stone folder</button><button id="exportCsv">Export CSV</button><button id="exportFolder">Export folder</button><button id="savePlan">Save plan</button><label class="btn plan-open">Open plan<input id="openPlan" type="file" accept=".json"></label></div>
+          <span id="fitInfo"></span>
+        </div>
+        <button id="inset" class="scan" aria-label="Switch view"><img alt=""><canvas width="264" height="330"></canvas></button>
+        <svg id="splitLine"><line stroke="#ff3bbd" stroke-width="2"></line></svg>
+        <div class="dim" id="dim"></div>
+      </div>
+      <div id="advPanel" hidden></div>
+    </section>
+    <section id="tab-limits" hidden></section>
+    <section id="tab-plan" hidden></section>
+    <section id="tab-images" hidden><div class="gallery" id="gallery"></div></section>
+    <section id="tab-compare" hidden></section>
+  </div>
+</main>
+<div id="big"><img alt="Scan image"></div>
+<div id="drop"></div>
+
+<script src="viewer/fitter.js"></script>
+<script src="viewer/read.js"></script>
+<script src="viewer/view.js"></script>
+<script src="viewer/plan.js"></script>
+<script src="viewer/write.js"></script>
+<script src="viewer/bulk.js"></script>
+<script src="viewer/advisor.js"></script>
+<script src="viewer/tools.js"></script>
+<script src="viewer/ui.js"></script>
+</body>
+</html>

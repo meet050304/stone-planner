@@ -1,0 +1,25 @@
+# Sarine's program files: never copy or upload
+Advisor/
+sarine analysis.gpr
+sarine analysis.rep/
+
+# Stone files and anything made from them
+stones/
+*.adv
+*.stn
+*.cap
+*.exe
+*.dll
+*.pdb
+rough-check/
+comparison/*.csv
+comparison/*.png
+comparison/*.jsonl
+comparison/*.json
+comparison/experiments/
+planner/results.json
+
+# Old dated copies: git keeps history now
+backups/
+
+.DS_Store

@@ -1,0 +1,43 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "viewer",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8765",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "/private/tmp/claude-501/-Users-meetmangukiya-Desktop-development/6d8ccf17-e2ab-47ac-9c17-69ae611fe540/scratchpad/serve"
+      ],
+      "port": 8765
+    },
+    {
+      "name": "saver",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "/private/tmp/claude-501/-Users-meetmangukiya-Desktop-development/6d8ccf17-e2ab-47ac-9c17-69ae611fe540/scratchpad/put_server.py",
+        "/private/tmp/claude-501/-Users-meetmangukiya-Desktop-development/6d8ccf17-e2ab-47ac-9c17-69ae611fe540/scratchpad/serve",
+        "8766"
+      ],
+      "port": 8766
+    },
+    {
+      "name": "project",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8770",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "/Users/meetmangukiya/Desktop/development"
+      ],
+      "port": 8770
+    }
+  ]
+}

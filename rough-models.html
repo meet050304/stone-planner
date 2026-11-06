@@ -1,0 +1,1135 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rough Models</title>
+<style>
+:root{--bg:#14171c;--panel:#1d2229;--line:#333b46;--text:#e8ebef;--dim:#9aa4b1;--accent:#4f9dff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
+h1{font-size:16px;margin:0}
+button,.pick{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font:inherit;cursor:pointer}
+button.on{border-color:var(--accent);color:var(--accent)}
+.group{display:flex;gap:4px}
+label.check{display:flex;gap:6px;align-items:center;cursor:pointer}
+#info{color:var(--dim);padding:10px 16px 0}
+#grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;padding:12px 16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.card h2{font-size:14px;margin:0;padding:10px 12px 2px}
+.card p{margin:0;padding:8px 12px 0;color:var(--dim);font-size:13px}
+.card ul{margin:0;padding:6px 12px 10px;list-style:none;font-size:13px}
+.card li.out{color:#ffc71a;font-weight:600}
+canvas{display:block;width:100%;aspect-ratio:1;cursor:grab;touch-action:none;background:#0d0f13}
+#legend{display:flex;gap:8px;align-items:center;color:var(--dim);font-size:13px}
+#legend i{display:block;width:120px;height:10px;border-radius:3px;background:linear-gradient(90deg,#8fa3b8,#f2c14e,#e0472f)}
+b.gold{display:block;width:12px;height:12px;border-radius:3px;background:#ffc71a}
+#empty{margin:40px 16px;padding:40px 16px;border:2px dashed var(--line);border-radius:8px;text-align:center;color:var(--dim)}
+</style></head><body>
+<header>
+  <h1>Rough models</h1>
+  <label class="pick">Open .adv file<input id="file" type="file" accept=".adv" hidden></label>
+  <label class="pick" title="For a re-saved or filled file: take the fine rough model from Advisor's original file of the same stone">Fine rough from original<input id="source" type="file" accept=".adv" hidden></label>
+  <div class="group" id="modes"><button data-mode="solid" class="on">Solid</button><button data-mode="both">Solid + lines</button><button data-mode="lines">Lines only</button></div>
+  <label class="check"><input id="pits" type="checkbox" checked> Colour the pits</label>
+  <label class="check"><input id="stones" type="checkbox" checked> Show stones</label>
+  <label class="check"><b class="gold"></b>Gold when closer than <input id="limit" type="range" min="0" max="60" step="1" value="0"> <output id="limitText">0 µm (only outside)</output></label>
+  <button id="reset">Reset view</button>
+  <div id="legend"><span>0</span><i></i><span id="legendMax">100 µm deep</span></div>
+</header>
+<div id="info"></div>
+<div id="grid"></div>
+<div id="empty">Drop a .adv file here, or press Open .adv file. The file is only read, on this computer.<br>Drag on any picture to turn all models together. Scroll to zoom.</div>
+<script>
+var MEASURED_DENSITY=3.50874;
+// Picks the file's current plan by weight, the same as the main viewer.
+function stoneWeight(r){
+  const m=brilliant(r,r.prop),p=m.pos,t=m.tris,n=p.length/3;let cx=0,cy=0,cz=0;
+  for(let i=0;i<p.length;i+=3){cx+=p[i]/n;cy+=p[i+1]/n;cz+=p[i+2]/n}
+  let v=0;
+  for(let i=0;i<t.length;i+=3){
+    const a=t[i]*3,b=t[i+1]*3,c=t[i+2]*3,ax=p[a]-cx,ay=p[a+1]-cy,az=p[a+2]-cz,bx=p[b]-cx,by=p[b+1]-cy,bz=p[b+2]-cz,dx=p[c]-cx,dy=p[c+1]-cy,dz=p[c+2]-cz;
+    v+=Math.abs(ax*(by*dz-bz*dy)+ay*(bz*dx-bx*dz)+az*(bx*dy-by*dx));
+  }
+  return v/6/1e9*MEASURED_DENSITY/200;
+}
+</script>
+<script>
+// Reading .adv files: the rough, inclusions, plan records, saws and scan images.
+'use strict';
+const MAGIC='ca9b28c7d7ec9b45aabfe4423fef0eff';
+const MESH_TAG=hex('95f2b28927963b48a7a200cba02f27ab');
+const COORD_LIMIT=20000;
+const FIELD_KEY=/^(Result(Group)?|stone|Stone|General|inclusions)\./;
+const stones=[];
+let current=-1,tab='model';
+
+function hex(s){return Uint8Array.from(s.match(/../g),x=>parseInt(x,16))}
+function findAll(u8,needle){
+  const hits=[];let i=0;
+  while((i=u8.indexOf(needle[0],i))!==-1&&i<=u8.length-needle.length){
+    let k=1;while(k<needle.length&&u8[i+k]===needle[k])k++;
+    if(k===needle.length)hits.push(i);
+    i++;
+  }
+  return hits;
+}
+const ascii=s=>Uint8Array.from(s,c=>c.charCodeAt(0));
+const text=(u8,s,e)=>String.fromCharCode.apply(null,u8.subarray(s,e));
+
+// Length-prefixed strings in the summary table; a few bytes between them are not text.
+function readTokens(u8,dv,start,limit){
+  const out=[];let p=start;const end=Math.min(u8.length-4,start+limit);
+  while(p<end){
+    const L=dv.getUint32(p,true);
+    if(L>0&&L<300&&p+4+L<=u8.length){
+      let ok=true;
+      for(let i=p+4;i<p+4+L;i++)if(u8[i]<32||u8[i]>126){ok=false;break}
+      if(ok){out.push(text(u8,p+4,p+4+L));p+=4+L;continue}
+    }
+    p++;
+  }
+  return out;
+}
+function readFields(u8,dv){
+  const at=findAll(u8.subarray(Math.max(0,u8.length-3e6)),ascii('User Name'))[0];
+  if(at===undefined)return{};
+  const toks=readTokens(u8,dv,Math.max(0,u8.length-3e6)+at-4,60000);
+  const keys=[];toks.forEach((t,i)=>{if(FIELD_KEY.test(t))keys.push(i)});
+  const f={};
+  keys.forEach((k,n)=>{
+    const stop=n+1<keys.length?keys[n+1]-1:k+1;
+    let v='';
+    for(let j=stop-1;j>k;j--){
+      const t=toks[j];
+      if(t==='ct'||t==='%'||t==='$')continue;
+      if(/^[A-Za-z0-9][A-Za-z0-9 .,_-]*$/.test(t)){v=t;break}
+    }
+    f[toks[k].trim()]=v;
+  });
+  return f;
+}
+function parseMesh(u8,dv,p){
+  if(p+28>u8.length)return null;
+  const size=dv.getUint32(p+20,true),end=p+24+size;
+  // Unprocessed stones leave junk in the upper half of the point count.
+  let nv=dv.getUint32(p+24,true);
+  if(nv*24+8>size)nv&=0xffff;
+  if(nv<3||nv*24+8>size||end>u8.length)return null;
+  const pos=new Float32Array(nv*3),damaged=new Set;
+  // Damaged data shows up as absurdly tiny numbers; a real point can still sit very close to zero.
+  const okCoord=v=>Math.abs(v)<COORD_LIMIT&&(v===0||Math.abs(v)>1e-30);
+  const okVertex=o=>o+24<=end&&[0,8,16].every(k=>okCoord(dv.getFloat64(o+k,true)));
+  let o=p+28;
+  for(let i=0;i<nv;i++,o+=24){
+    if(!okVertex(o)){damaged.add(i);continue}
+    for(let k=0;k<3;k++)pos[i*3+k]=dv.getFloat64(o+k*8,true);
+  }
+  const bad=damaged.size;
+  const tris=[],held=[];let q=o+4,faces=0,skipped=0;
+  while(q+4<=end){
+    const n=dv.getUint32(q,true);
+    if(n>=3&&n<=200&&q+4+4*n<=end){
+      const idx=[];let ok=true;
+      for(let i=0;i<n;i++){const v=dv.getUint32(q+4+4*i,true);if(v>=nv){ok=false;break}idx.push(v)}
+      if(ok){
+        const to=idx.some(v=>damaged.has(v))?held:tris;
+        for(let i=1;i<n-1;i++)to.push(idx[0],idx[i],idx[i+1]);
+        faces++;q+=4+4*n;continue;
+      }
+    }
+    skipped++;q+=4;
+  }
+  return{nv,pos,tris,faces,bad,skipped,offset:p,damaged,held};
+}
+// Gives damaged points the middle of their neighbours and puts their faces back, closing the holes.
+function repairMesh(m){
+  const near=new Map,list=[...m.tris,...m.held];
+  for(let i=0;i<list.length;i+=3)for(let k=0;k<3;k++){
+    const a=list[i+k],b=list[i+(k+1)%3];
+    for(const [x,y] of [[a,b],[b,a]])if(m.damaged.has(x)){if(!near.has(x))near.set(x,new Set);near.get(x).add(y)}
+  }
+  const left=new Set(m.damaged);
+  for(let pass=0;pass<20&&left.size;pass++)for(const v of [...left]){
+    const good=[...(near.get(v)||[])].filter(n=>!left.has(n));
+    if(!good.length)continue;
+    for(let k=0;k<3;k++)m.pos[v*3+k]=good.reduce((t,n)=>t+m.pos[n*3+k],0)/good.length;
+    left.delete(v);
+  }
+  if(left.size)return;
+  m.tris=list;m.bad=0;m.held=[];m.damaged=new Set;
+}
+function bbox(m){
+  const lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];
+  for(const v of m.tris)for(let k=0;k<3;k++){const c=m.pos[v*3+k];if(c<lo[k])lo[k]=c;if(c>hi[k])hi[k]=c}
+  return{lo,hi};
+}
+function volumeMm3(m){
+  let v=0;const p=m.pos,t=m.tris;
+  for(let i=0;i<t.length;i+=3){
+    const a=t[i]*3,b=t[i+1]*3,c=t[i+2]*3;
+    v+=p[a]*(p[b+1]*p[c+2]-p[b+2]*p[c+1])+p[a+1]*(p[b+2]*p[c]-p[b]*p[c+2])+p[a+2]*(p[b]*p[c+1]-p[b+1]*p[c]);
+  }
+  return Math.abs(v)/6/1e9;
+}
+// Just before the frames each file stores the scanner pose: a rotation, an offset, the image
+// height in micrometres, and a table of frame angles that starts at 270 degrees.
+function readScanPose(u8,dv){
+  const step=2*Math.PI/300,bytes=new Uint8Array(new Float64Array([1.5*Math.PI]).buffer);
+  for(const h of findAll(u8,bytes)){
+    if(h<460||Math.abs(dv.getFloat64(h+8,true)-1.5*Math.PI-step)>1e-6)continue;
+    const R=[0,1,2].map(r=>[0,1,2].map(c=>dv.getFloat64(h-84+8*(3*r+c),true)));
+    const T=[0,1,2].map(i=>dv.getFloat64(h-108+8*i,true));
+    if(R.some(r=>Math.abs(r[0]**2+r[1]**2+r[2]**2-1)>1e-3))continue;
+    return{R,T,span:dv.getFloat64(h-444,true),scale:1024/Math.abs(dv.getFloat64(h-412,true))};
+  }
+  return null;
+}
+function sawCut(stone,n,d){
+  const out=[],P=stone.pos,T=stone.tris;
+  for(let i=0;i<T.length;i+=3){
+    const v=[T[i],T[i+1],T[i+2]].map(j=>[P[j*3],P[j*3+1],P[j*3+2]]),e=v.map(q=>q[0]*n[0]+q[1]*n[1]+q[2]*n[2]-d),hit=[];
+    for(let k=0;k<3;k++){const m=(k+1)%3;if(e[k]*e[m]<0){const t=e[k]/(e[k]-e[m]);hit.push([0,1,2].map(c=>v[k][c]+(v[m][c]-v[k][c])*t))}}
+    if(hit.length===2)out.push(hit);
+  }
+  return out;
+}
+function jpegWidth(u8,s,e){
+  for(let i=s+2;i<e-9;){
+    if(u8[i]!==0xff){i++;continue}
+    const m=u8[i+1];
+    if(m>=0xc0&&m<=0xc3)return u8[i+7]*256+u8[i+8];
+    i+=2+u8[i+2]*256+u8[i+3];
+  }
+  return 0;
+}
+function findImages(u8,file){
+  const soi=[];let i=0;
+  while((i=u8.indexOf(0xff,i))!==-1&&i<u8.length-3){
+    if(u8[i+1]===0xd8&&u8[i+2]===0xff&&(u8[i+3]===0xe0||u8[i+3]===0xdb||u8[i+3]===0xe1))soi.push(i);
+    i++;
+  }
+  const out=[];
+  soi.forEach((s,k)=>{
+    const lim=k+1<soi.length?soi[k+1]:u8.length;
+    for(let e=lim-2;e>s;e--)if(u8[e]===0xff&&u8[e+1]===0xd9){if(e+2-s>5000)out.push({s,e:e+2,w:jpegWidth(u8,s,e)});break}
+  });
+  return out;
+}
+function namedOptions(u8,dv){
+  const names=new Set,shapes=new Set;
+  for(const pre of['Saw','Pie']){
+    for(const p of findAll(u8,ascii(pre))){
+      if(p<4)continue;
+      const L=dv.getUint32(p-4,true);
+      if(L>=5&&L<12&&/^(Saw|Pie)\d+-\d+$/.test(text(u8,p,p+L)))names.add(text(u8,p,p+L));
+    }
+  }
+  for(const s of['ROUND','MARQUISE'])if(findAll(u8,ascii(s)).length)shapes.add(s);
+  return{names:[...names],shapes:[...shapes]};
+}
+// Plan records end with a pair of -12345 markers; the first ones in a file are the current plan.
+function readPlacements(u8,dv,count){
+  const out=[];
+  for(const h of findAll(u8,new Uint8Array(new Float64Array([-12345]).buffer))){
+    const q=h-92;
+    if(q<56||out.length>=count)continue;
+    const D=dv.getFloat64(q,true);
+    if(!(D>100&&D<6000))continue;
+    const n=[0,1,2].map(i=>dv.getFloat64(q+32+8*i,true));
+    if(Math.abs(n[0]**2+n[1]**2+n[2]**2-1)>1e-3)continue;
+    out.push({q,D,angles:[0,1,2].map(i=>dv.getFloat64(q-56+8*i,true)),center:[0,1,2].map(i=>dv.getFloat64(q-24+8*i,true))});
+  }
+  return out;
+}
+// A file can keep earlier plans and Advisor's list of other results beside the current plan. Stone records a few
+// kilobytes apart belong to one plan. The current plan is the one whose total polished weight (and, for one stone,
+// total depth) agrees with Advisor's own result fields; when several agree, the latest in the file. Files with one
+// plan, or without those fields, read as before: the first records.
+const PLAN_GAP=10000;
+function currentPlan(u8,dv,count,f){
+  const all=readPlacements(u8,dv,100000).map(r=>({...r,prop:readProportions(dv,u8,r.q)}));
+  const groups=[];
+  for(const r of all){const g=groups[groups.length-1];if(g&&r.q-g[g.length-1].q<PLAN_GAP)g.push(r);else groups.push([r])}
+  const fits=groups.filter(g=>g.length===count),weight=+f['Result.cur.TotalPolishWeight'],depth=+f['Result.Cur.TotalDepth_%'];
+  if(!(weight>0))return all.slice(0,count);
+  // A file saved with all results keeps each plan's stones 2.8 MB apart, one plan after another, and also lists other
+  // stones in short records. The header at 76 holds the ticked plan's exact total, so the run of stones with that total wins.
+  const exact=dv.getFloat64(76,true),ct=r=>{const v=dv.getFloat64(r.q+8,true);return v>1e6?v*1e-9*3.50874/200:stoneWeight(r)},sum=g=>g.reduce((t,r)=>t+ct(r),0);
+  if(exact>0){
+    let run=null,least=2e-6;
+    for(let i=0;i+count<=all.length;i++){const g=all.slice(i,i+count),miss=Math.abs(sum(g)-exact);if(miss<=least){least=miss;run=g}}
+    if(run)return run;
+  }
+  if(!fits.length)return all.slice(0,count);
+  let best=null,bestScore=Infinity;
+  for(const g of fits){
+    const w=g.reduce((t,r)=>t+stoneWeight(r),0),d=count===1&&depth>0&&!g[0].prop.assumed?Math.abs(g[0].prop.total*100-depth)/100:0;
+    // The weight field has 3 decimals, so differences inside its rounding count as none.
+    const score=Math.max(0,Math.abs(w-weight)-.0005)/Math.max(weight,1e-6)+d;
+    if(score<=bestScore+1e-9){bestScore=score;best=g}
+  }
+  return best;
+}
+// Fields run in the order the round cut plug-in names them: girdle, table, crown angle, pavilion
+// angle, crown height, pavilion height, total height, then star and lower-half ratios further on.
+// The grading system's minimum and maximum limits use the same layout, but only a real stone's values
+// agree with each other: tan(crown angle) = 2 crown / (1 - table), tan(pavilion angle) = 2 pavilion.
+function readProportions(dv,u8,q){
+  const at=o=>o+8<=u8.length?dv.getFloat64(o,true):NaN;
+  const block=b=>({girdle:at(b),table:at(b+8),crownAngle:at(b+16),pavAngle:at(b+24),crown:at(b+32),pavilion:at(b+40),total:at(b+48),star:at(b+136),half:at(b+144)});
+  let best=null;
+  // A stone's own block sits 248 bytes from its placement record; the limit blocks sit further away.
+  for(const o of [q-248,q+248]){
+    const p=block(o);
+    if(!(p.crown>.05&&p.crown<.3&&p.pavilion>.3&&p.pavilion<.6&&p.girdle>0&&p.girdle<.12&&p.table>.4&&p.table<.8))continue;
+    if(Math.abs(p.crown+p.girdle+p.pavilion-p.total)>1e-6)continue;
+    if(Math.abs(Math.tan(p.crownAngle)-2*p.crown/(1-p.table))>.004||Math.abs(Math.tan(p.pavAngle)-2*p.pavilion)>.004)continue;
+    if(!(p.star>.3&&p.star<.8&&p.half>.5&&p.half<.95))continue;
+    best=p;p.at=o;
+  }
+  return best||{girdle:.03,table:.58,crown:.15,pavilion:.43,star:.55,half:.78,assumed:true};
+}
+// Round brilliant in local axes: origin at the top of the girdle, +z towards the culet.
+function brilliant({D,angles:[a,b,c],center},p){
+  const R=D/2,rt=R*p.table,hc=p.crown*D,zg=p.girdle*D,zc=zg+p.pavilion*D,V=[],add=(r,t,z)=>(V.push(r*Math.cos(t),r*Math.sin(t),z),V.length/3-1);
+  const step=Math.PI/4,table=[],star=[],top=[],low=[],tip=[];
+  // Facets are planar: the star tip lies on the bezel plane and the lower-half tip on the pavilion main plane.
+  const cos=Math.cos(step/2),rm=rt*cos,rs=rm+(R-rm)*p.star,zs=-hc*(R-rs*cos)/(R-rt);
+  // Advisor's girdle has 48 sides: with 6 per facet pair the volume matches Advisor's stored volume to 0.00001%.
+  const rl=R*(1-p.half),zl=zg+p.pavilion*D*(1-(1-p.half)*cos),ARC=6,RING=8*ARC,seg=2*Math.PI/RING;
+  for(let i=0;i<8;i++){table.push(add(rt,i*step,-hc));star.push(add(rs,(i+.5)*step,zs));tip.push(add(rl,(i+.5)*step,zl))}
+  // The girdle is a true circle, so it gets many short edges instead of one per facet.
+  // Girdle facets are flat, so between its touch points the rim dips into the girdle.
+  const dip=(rTip,zTip,az)=>{
+    const half=step/2,k=Math.floor(az/half+1e-9),a0=k*half,a1=a0+half,sec=Math.floor(k/2),t=(sec+.5)*step;
+    const P=[[R*Math.cos(a0),R*Math.sin(a0),0],[R*Math.cos(a1),R*Math.sin(a1),0],[rTip*Math.cos(t),rTip*Math.sin(t),zTip]];
+    const u=[0,1,2].map(i=>P[1][i]-P[0][i]),v=[0,1,2].map(i=>P[2][i]-P[0][i]),n=[u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]];
+    const x=R*Math.cos(az),y=R*Math.sin(az);
+    return -(n[0]*(x-P[0][0])+n[1]*(y-P[0][1]))/n[2];
+  };
+  for(let i=0;i<RING;i++){
+    const az=i*seg;
+    top.push(add(R,az,-dip(rs,-zs,az)));
+    low.push(add(R,az,zg+dip(rl,zl-zg,az)));
+  }
+  const culet=add(0,0,zc),F=[table],E=[];
+  const loop=f=>f.forEach((v,i)=>E.push(v,f[(i+1)%f.length]));
+  loop(table);
+  for(let i=0;i<8;i++){
+    const j=(i+1)%8,g=i*ARC,prev=(i+7)%8,gNext=(g+ARC)%RING;
+    F.push([table[i],table[j],star[i]],[table[i],star[prev],top[g],star[i]]);
+    E.push(table[i],star[i],table[j],star[i],star[i],top[g],star[i],top[gNext],tip[i],low[g],tip[i],low[gNext],culet,tip[i]);
+    // Each section holds two girdle facets, above and below, meeting along this line.
+    E.push(star[i],top[g+ARC/2],tip[i],low[g+ARC/2]);
+    for(let k=0;k<ARC;k++){
+      const a=g+k,b=(a+1)%RING;
+      F.push([star[i],top[a],top[b]],[tip[i],low[a],low[b]]);
+    }
+    F.push([culet,tip[prev],low[g],tip[i]]);
+  }
+  for(let i=0;i<RING;i++){const j=(i+1)%RING;F.push([top[i],top[j],low[j],low[i]]);E.push(top[i],top[j],low[i],low[j])}
+  const tris=[];for(const f of F)for(let i=1;i<f.length-1;i++)tris.push(f[0],f[i],f[i+1]);
+  const ca=Math.cos(a),sa=Math.sin(a),cb=Math.cos(b),sb=Math.sin(b),cc=Math.cos(c),sc=Math.sin(c);
+  const pos=new Float32Array(V.length);
+  for(let i=0;i<V.length;i+=3){
+    const x0=V[i]*ca-V[i+1]*sa,y0=V[i]*sa+V[i+1]*ca,z0=V[i+2];
+    const y1=y0*cb-z0*sb,z1=y0*sb+z0*cb;
+    pos[i]=center[0]+x0*cc-y1*sc;pos[i+1]=center[1]+x0*sc+y1*cc;pos[i+2]=center[2]+z1;
+  }
+  return{pos,tris,edges:E};
+}
+// Unpacks one deflate section, stopping where its data ends. The browser's own unpacker rejects a
+// whole section for spare bytes after the data. A damaged section gives what was read before the damage.
+const LENGTH_BASE=[3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+const LENGTH_EXTRA=[0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+const DISTANCE_BASE=[1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+const DISTANCE_EXTRA=[0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+function huffman(lengths){
+  const count=new Uint16Array(16),next=new Uint16Array(16),symbols=new Uint16Array(lengths.length);
+  for(const l of lengths)count[l]++;
+  count[0]=0;
+  for(let i=1;i<16;i++)next[i]=next[i-1]+count[i-1];
+  lengths.forEach((l,i)=>{if(l)symbols[next[l]++]=i});
+  return{count,symbols};
+}
+// dict: data the stream may refer back into (the piece before it), as when one stream is cut into pieces.
+function inflate(data,size,dict=null,gap=null){
+  const pre=dict?dict.length:0;
+  let out=new Uint8Array(size+pre),o=pre,p=0,bits=0,have=0;
+  if(dict)out.set(dict);
+  const take=n=>{
+    while(have<n){if(p>=data.length)throw 0;bits|=data[p++]<<have;have+=8}
+    const v=bits&((1<<n)-1);bits>>>=n;have-=n;return v;
+  };
+  const symbol=h=>{
+    let code=0,first=0,index=0;
+    for(let l=1;l<16;l++){
+      code|=take(1);
+      const c=h.count[l];
+      if(code-c<first)return h.symbols[index+code-first];
+      index+=c;first=(first+c)<<1;code<<=1;
+    }
+    throw 0;
+  };
+  const room=n=>{if(o+n>out.length){const g=new Uint8Array(Math.max(out.length*2,o+n));g.set(out);out=g}};
+  const fixedLengths=new Uint8Array(288).map((_,i)=>i<144?8:i<256?9:i<280?7:8);
+  try{
+    for(let last=0;!last;){
+      last=take(1);
+      const type=take(2);
+      if(type===0){
+        bits=0;have=0;
+        const n=data[p]|data[p+1]<<8;p+=4;
+        room(n);out.set(data.subarray(p,p+n),o);o+=n;p+=n;
+        continue;
+      }
+      if(type===3)throw 0;
+      let literal,distance;
+      if(type===1){literal=huffman([...fixedLengths]);distance=huffman(new Array(30).fill(5))}
+      else{
+        const nl=take(5)+257,nd=take(5)+1,nc=take(4)+4,order=[16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15],code=new Array(19).fill(0);
+        for(let i=0;i<nc;i++)code[order[i]]=take(3);
+        const h=huffman(code),lengths=new Array(nl+nd).fill(0);
+        for(let i=0;i<nl+nd;){
+          const c=symbol(h);
+          if(c<16){lengths[i++]=c;continue}
+          const value=c===16?lengths[i-1]:0;
+          let run=c===16?3+take(2):c===17?3+take(3):11+take(7);
+          while(run--)lengths[i++]=value;
+        }
+        literal=huffman(lengths.slice(0,nl));distance=huffman(lengths.slice(nl));
+      }
+      for(;;){
+        // Bytes lost from the packed data lost their output too: leaving room for it keeps later copies pointing at the right bytes.
+        if(gap&&o-pre>=gap.at){room(gap.len);o+=gap.len;gap=null}
+        const c=symbol(literal);
+        if(c<256){room(1);out[o++]=c;continue}
+        if(c===256)break;
+        const n=LENGTH_BASE[c-257]+take(LENGTH_EXTRA[c-257]),d=symbol(distance),back=DISTANCE_BASE[d]+take(DISTANCE_EXTRA[d]);
+        if(back>o)throw 0;
+        room(n);
+        for(let i=0;i<n;i++,o++)out[o]=out[o-back];
+      }
+    }
+  }catch(e){if(e!==0)throw e}
+  return out.subarray(pre,o).slice();
+}
+// Unprocessed stones keep their rough model and inclusions in compressed sections inside the file.
+// Sound records of raw points in one stretch of a section, at the best of the 8 byte places.
+function pointScore(part,from,to){
+  const dv=new DataView(part.buffer,part.byteOffset,part.length);let best=0;
+  for(let k=0;k<8;k++){
+    let c=0;
+    for(let o=from+k;o+8<=Math.min(part.length,to+k);o+=8){const x=dv.getInt16(o,true),y=dv.getInt16(o+2,true),z=dv.getInt16(o+4,true),v=dv.getInt16(o+6,true);if(Math.abs(x)<4000&&Math.abs(y)<4000&&z>-100&&z<6000&&v>=0&&v<=POINT_FOURTH_MAX)c++}
+    if(c>best)best=c;
+  }
+  return best;
+}
+// A point section can lose a few dozen packed bytes (the zip's sizes show it). The points after that read as rubbish.
+// Unpacking again with room left for the lost output, at the place the rubbish starts, brings them back.
+function mendSection(data,size,part,dict){
+  const STEP=256,len=size-part.length;
+  let bad=-1;
+  for(let w=0;w+STEP<=part.length;w+=STEP)if(pointScore(part,w,w+STEP)<.6*STEP/8){bad=w;break}
+  if(bad<0)return part;
+  const total=p=>{let t=0;for(let w=0;w+STEP<=p.length;w+=STEP)t+=pointScore(p,w,w+STEP);return t};
+  let best=part,score=total(part);
+  for(let at=Math.max(0,bad-STEP);at<=bad+STEP;at+=32){
+    const fresh=inflate(data,size,dict,{at,len}),t=total(fresh);
+    if(t>score){score=t;best=fresh;best.continued=part.continued}
+  }
+  return best;
+}
+function unzipSections(buf){
+  const u8=new Uint8Array(buf),dv=new DataView(buf),out=[];
+  if(findAll(u8,MESH_TAG).length)return out;
+  // Sections are found by their name, because a section's PK mark can be damaged. The directory at the end of the file
+  // repeats each name, with its own mark 46 bytes before the name: those are left out.
+  for(const at of findAll(u8,ascii('ZippedData'))){
+    const p=at-30;
+    if(p<0||p+30>u8.length||(at>=46&&dv.getUint32(at-46,true)===0x02014b50)||dv.getUint16(p+26,true)!==10)continue;
+    const packed=dv.getUint32(p+18,true),from=p+30+dv.getUint16(p+26,true)+dv.getUint16(p+28,true);
+    if(from+packed>u8.length)continue;
+    const size=dv.getUint32(p+22,true),data=u8.subarray(from,from+packed);
+    let part=inflate(data,size);
+    // A piece that stops early refers back into the piece before it: unpack it again with that piece in front.
+    let dict=null;
+    if(part.length<size&&out.length){const before=out[out.length-1].slice(-32768),again=inflate(data,size,before);if(again.length>part.length){part=again;part.continued=true;dict=before}}
+    if(size<=80000&&part.length<size&&size-part.length<2000)part=mendSection(data,size,part,dict);
+    if(part.length)out.push(part);
+  }
+  return out;
+}
+// Raw inclusion points (files saved before the inclusions were made into shapes): 8-byte records of x, y, z in
+// micrometres (16-bit) and one more value. Pieces that unpack on their own are read strictly every 8 bytes. A piece
+// that continues the one before can be shifted in places, so it is read in windows, each at the byte offset (0, 2, 4
+// or 6) where most records fall in the rough's box. Every point kept must be inside the rough itself.
+const POINT_GROUP_UM=25,POINT_WINDOW=512,POINT_STEP=64,POINT_FOURTH_MAX=400;
+function roughInside(stone){
+  const P=stone.pos,T=stone.tris,B=60,box=bbox(stone),bx=Math.ceil((box.hi[0]-box.lo[0])/B)+1,by=Math.ceil((box.hi[1]-box.lo[1])/B)+1,bins=Array.from({length:bx*by},()=>[]);
+  for(let i=0;i<T.length;i+=3){
+    let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+    for(let j=0;j<3;j++){const v=T[i+j]*3;x0=Math.min(x0,P[v]);x1=Math.max(x1,P[v]);y0=Math.min(y0,P[v+1]);y1=Math.max(y1,P[v+1])}
+    for(let X=Math.floor((x0-box.lo[0])/B);X<=Math.floor((x1-box.lo[0])/B);X++)for(let Y=Math.floor((y0-box.lo[1])/B);Y<=Math.floor((y1-box.lo[1])/B);Y++)bins[X*by+Y].push(i);
+  }
+  // Count the rough's surface crossings on a line straight up from the point.
+  return(x,y,z)=>{
+    const X=Math.floor((x-box.lo[0])/B),Y=Math.floor((y-box.lo[1])/B);
+    if(X<0||Y<0||X>=bx||Y>=by||z<box.lo[2]||z>box.hi[2])return false;
+    let n=0;
+    for(const t of bins[X*by+Y]){
+      const A=T[t]*3,Bv=T[t+1]*3,C=T[t+2]*3,det=(P[Bv+1]-P[C+1])*(P[A]-P[C])+(P[C]-P[Bv])*(P[A+1]-P[C+1]);
+      if(Math.abs(det)<1e-12)continue;
+      const w0=((P[Bv+1]-P[C+1])*(x-P[C])+(P[C]-P[Bv])*(y-P[C+1]))/det,w1=((P[C+1]-P[A+1])*(x-P[C])+(P[A]-P[C])*(y-P[C+1]))/det,w2=1-w0-w1;
+      if(w0<0||w1<0||w2<0)continue;
+      if(w0*P[A+2]+w1*P[Bv+2]+w2*P[C+2]>z)n++;
+    }
+    return n%2===1;
+  };
+}
+function rawInclusionPoints(sections,stone){
+  const box=bbox(stone),pad=50,inBox=(x,y,z)=>x>box.lo[0]-pad&&x<box.hi[0]+pad&&y>box.lo[1]-pad&&y<box.hi[1]+pad&&z>box.lo[2]-pad&&z<box.hi[2]+pad;
+  const inside=roughInside(stone),pts=[];let pieces=0,read=0,outside=0;
+  for(const part of sections){
+    if(part.length>80000||part.length<8||findAll(part,MESH_TAG).length)continue;
+    const dv=new DataView(part.buffer,part.byteOffset,part.length),fourth=o=>dv.getInt16(o+6,true),rec=o=>[dv.getInt16(o,true),dv.getInt16(o+2,true),dv.getInt16(o+4,true)],sound=o=>{const v=fourth(o);return v>=0&&v<=POINT_FOURTH_MAX&&inBox(...rec(o))};
+    // only pieces that read as points from their start
+    let good=0;const test=Math.min(50,part.length>>3);
+    for(let k=0;k<8;k++){let c=0;for(let i=0;i<test;i++)if(i*8+k+8<=part.length&&inBox(...rec(i*8+k)))c++;if(c>good)good=c}
+    if(good<test*.8)continue;
+    pieces++;
+    const take=o=>{if(!sound(o))return;const [x,y,z]=rec(o);if(inside(x,y,z)){pts.push(x,y,z);read++}else outside++};
+    // After a damaged spot the records drift, even by odd bytes, so the place is found again, in short steps where needed.
+    const place=(from,to)=>{
+      let shift=0,best=-1;
+      for(let k=0;k<8;k++){let c=0;for(let o=from+k;o+8<=Math.min(part.length,to+k);o+=8)if(sound(o))c++;if(c>best){best=c;shift=k}}
+      return[shift,best];
+    };
+    const readPart=(from,to,shift)=>{for(let o=from+shift;o+8<=Math.min(part.length,to+shift);o+=8)take(o)};
+    for(let w=0;w<part.length;w+=POINT_WINDOW){
+      const [shift,best]=place(w,w+POINT_WINDOW);
+      if(best>=.9*POINT_WINDOW/8){readPart(w,w+POINT_WINDOW,shift);continue}
+      for(let v=w;v<w+POINT_WINDOW&&v<part.length;v+=POINT_STEP){const [s2,b2]=place(v,v+POINT_STEP);if(b2>0)readPart(v,v+POINT_STEP,s2)}
+    }
+  }
+  return{pts,pieces,read,dropped:outside,inside};
+}
+// Points closer than POINT_GROUP_UM form one inclusion.
+function groupPoints(pts){
+  const n=pts.length/3,G=POINT_GROUP_UM,cell=new Map(),key=(i,j,k)=>i+','+j+','+k,parent=Int32Array.from({length:n},(_,i)=>i);
+  const find=a=>{while(parent[a]!==a){parent[a]=parent[parent[a]];a=parent[a]}return a};
+  for(let i=0;i<n;i++){const k=key(Math.floor(pts[i*3]/G),Math.floor(pts[i*3+1]/G),Math.floor(pts[i*3+2]/G));if(!cell.has(k))cell.set(k,[]);cell.get(k).push(i)}
+  for(const [k,list] of cell){
+    const [a,b,c]=k.split(',').map(Number);
+    for(let i=-1;i<=1;i++)for(let j=-1;j<=1;j++)for(let l=-1;l<=1;l++){
+      const other=cell.get(key(a+i,b+j,c+l));if(!other)continue;
+      for(const p of list)for(const q of other){
+        if(q<=p)continue;
+        const dx=pts[p*3]-pts[q*3],dy=pts[p*3+1]-pts[q*3+1],dz=pts[p*3+2]-pts[q*3+2];
+        if(dx*dx+dy*dy+dz*dz<=G*G){const rp=find(p),rq=find(q);if(rp!==rq)parent[rp]=rq}
+      }
+    }
+  }
+  const groups=new Map();
+  for(let i=0;i<n;i++){const r=find(i);if(!groups.has(r))groups.set(r,[]);groups.get(r).push(i)}
+  return[...groups.values()];
+}
+// A point group drawn as a smooth solid body, as Advisor shows it: the points fill small cubes (POINT_CELL_UM),
+// gaps of one cube are closed, the outer faces of the filled cubes make the surface, and the surface is then
+// smoothed by moving each corner towards the middle of its neighbours (POINT_SMOOTH rounds).
+const POINT_CELL_UM=12,POINT_SMOOTH=4;
+function pointMesh(pts,list,inside){
+  const C=POINT_CELL_UM,S=1024,O=512,key=(i,j,k)=>((i+O)*S+(j+O))*S+(k+O),fill=new Set();
+  for(const p of list)fill.add(key(Math.floor(pts[p*3]/C),Math.floor(pts[p*3+1]/C),Math.floor(pts[p*3+2]/C)));
+  const unkey=v=>[Math.floor(v/(S*S))-O,Math.floor(v/S)%S-O,v%S-O],around=[];
+  for(let i=-1;i<=1;i++)for(let j=-1;j<=1;j++)for(let k=-1;k<=1;k++)around.push([i,j,k]);
+  // close gaps: grow by one cube, then add grown cubes whose whole neighbourhood is in the grown set
+  const grown=new Set();
+  for(const v of fill){const [i,j,k]=unkey(v);for(const [a,b,c] of around)grown.add(key(i+a,j+b,k+c))}
+  const solid=new Set(fill);
+  for(const v of grown){if(solid.has(v))continue;const [i,j,k]=unkey(v);if(around.every(([a,b,c])=>grown.has(key(i+a,j+b,k+c))))solid.add(v)}
+  const pos=[],tris=[],corner=new Map(),vert=(i,j,k)=>{const q=key(i,j,k);let n=corner.get(q);if(n===undefined){n=pos.length/3;corner.set(q,n);pos.push(i*C,j*C,k*C)}return n};
+  const sides=[[[1,0,0],[[1,0,0],[1,1,0],[1,1,1],[1,0,1]]],[[-1,0,0],[[0,0,0],[0,0,1],[0,1,1],[0,1,0]]],[[0,1,0],[[0,1,0],[0,1,1],[1,1,1],[1,1,0]]],
+    [[0,-1,0],[[0,0,0],[1,0,0],[1,0,1],[0,0,1]]],[[0,0,1],[[0,0,1],[1,0,1],[1,1,1],[0,1,1]]],[[0,0,-1],[[0,0,0],[0,1,0],[1,1,0],[1,0,0]]]];
+  const links=[];
+  for(const v of solid){
+    const [i,j,k]=unkey(v);
+    for(const [[a,b,c],q] of sides){
+      if(solid.has(key(i+a,j+b,k+c)))continue;
+      const n=q.map(([x,y,z])=>vert(i+x,j+y,k+z));
+      tris.push(n[0],n[1],n[2],n[0],n[2],n[3]);
+      for(let e=0;e<4;e++)links.push(n[e],n[(e+1)%4]);
+    }
+  }
+  const nv=pos.length/3,nb=Array.from({length:nv},()=>new Set());
+  for(let e=0;e<links.length;e+=2){nb[links[e]].add(links[e+1]);nb[links[e+1]].add(links[e])}
+  let P=Float32Array.from(pos);
+  for(let r=0;r<POINT_SMOOTH;r++){
+    const Q=new Float32Array(P.length);
+    for(let v=0;v<nv;v++){
+      let x=0,y=0,z=0;for(const u of nb[v]){x+=P[u*3];y+=P[u*3+1];z+=P[u*3+2]}
+      const m=nb[v].size||1;Q[v*3]=(P[v*3]+x/m)/2;Q[v*3+1]=(P[v*3+1]+y/m)/2;Q[v*3+2]=(P[v*3+2]+z/m)/2;
+    }
+    P=Q;
+  }
+  // a corner outside the rough goes to the nearest point of the group, which is inside
+  if(inside)for(let v=0;v<nv;v++){
+    if(inside(P[v*3],P[v*3+1],P[v*3+2]))continue;
+    let best=Infinity,at=list[0];
+    for(const p of list){const d=(pts[p*3]-P[v*3])**2+(pts[p*3+1]-P[v*3+1])**2+(pts[p*3+2]-P[v*3+2])**2;if(d<best){best=d;at=p}}
+    P[v*3]=pts[at*3];P[v*3+1]=pts[at*3+1];P[v*3+2]=pts[at*3+2];
+  }
+  return{nv,pos:P,tris,faces:tris.length/3,bad:0,skipped:0,offset:0};
+}
+
+async function openAdv(file){
+  const buf=await file.arrayBuffer();
+  return parseAdv(buf,file,unzipSections(buf));
+}
+// One inclusion piece in a compressed section: its points, then its polygons.
+function zippedPiece(u8,dv,q,nv){
+  const end=q+24*nv;
+  if(end+4>u8.length)return null;
+  const pos=new Float32Array(nv*3);
+  for(let i=0;i<nv*3;i++){
+    const v=dv.getFloat64(q+i*8,true);
+    if(!(Math.abs(v)<COORD_LIMIT))return null;
+    pos[i]=v;
+  }
+  const faces=dv.getUint32(end,true),tris=[];
+  let r=end+4;
+  if(faces<1||faces>nv*4)return null;
+  for(let f=0;f<faces;f++){
+    if(r+4>u8.length)return null;
+    const n=dv.getUint32(r,true);
+    if(n<3||n>500||r+4+4*n>u8.length)return null;
+    const idx=[];
+    for(let i=0;i<n;i++){const v=dv.getUint32(r+4+4*i,true);if(v>=nv)return null;idx.push(v)}
+    for(let i=1;i<n-1;i++)tris.push(idx[0],idx[i],idx[i+1]);
+    r+=4+4*n;
+  }
+  return{mesh:{nv,pos,tris,faces,bad:0,skipped:0,offset:q},end:r};
+}
+// After the inclusion's number comes how many real pieces it has, then each piece in turn.
+// Merged copies follow them and are not read.
+function zippedPieces(u8,dv,start){
+  const out=[],count=dv.getUint32(start,true);
+  if(count>100000)return out;
+  let q=start+4;
+  for(let i=0;i<count&&q+4<=u8.length;i++){
+    const nv=dv.getUint32(q,true);
+    const piece=nv>=3&&nv<=100000?zippedPiece(u8,dv,q+4,nv):null;
+    if(!piece)break;
+    out.push(piece.mesh);q=piece.end;
+  }
+  return out;
+}
+const PLATE_GAP=400,PLATE_CLEAR=40;
+// The plane with the widest gap between two sets of points, from a to b.
+function clearestGap(a,b){
+  const mean=q=>[0,1,2].map(k=>q.reduce((t,p)=>t+p[k],0)/q.length),ma=mean(a),mb=mean(b);
+  let n=[0,1,2].map(k=>mb[k]-ma[k]),l=Math.hypot(...n);n=n.map(v=>v/l);
+  let best=null;
+  for(let i=0;i<80;i++){
+    let hi=-Infinity,lo=Infinity,x=null,y=null;
+    for(const p of a){const d=p[0]*n[0]+p[1]*n[1]+p[2]*n[2];if(d>hi){hi=d;x=p}}
+    for(const p of b){const d=p[0]*n[0]+p[1]*n[1]+p[2]*n[2];if(d<lo){lo=d;y=p}}
+    if(!best||lo-hi>best.gap)best={n:[...n],off:(lo+hi)/2,gap:lo-hi};
+    const w=[0,1,2].map(k=>y[k]-x[k]),m=Math.hypot(...w)||1,step=.35*(1-i/80)+.02;
+    n=n.map((v,k)=>v*(1-step)+w[k]/m*step);l=Math.hypot(...n);n=n.map(v=>v/l);
+  }
+  return best;
+}
+// The fine rough model: about 10,000 points in rows 46 um apart. Its weight is the file's rough weight, and it holds the pits
+// the other models cover. parseMesh rejects it: part way through, a few records go missing and the data runs some bytes off,
+// so the points and faces are found again here. After a gap the point numbering is settled by the faces: the right numbering
+// gives short edges, a wrong one long edges across the stone.
+function fineRough(buf){
+  const u8=new Uint8Array(buf),dv=new DataView(buf);
+  let q0=-1,nv=0;
+  for(const q of findAll(u8,MESH_TAG)){
+    if(q>4e6||q+28>u8.length)continue;
+    const n=dv.getUint32(q+24,true)&0xffff,size=dv.getUint32(q+20,true);
+    if(n>3000&&n>nv&&Math.abs(size-(8+n*24+(2*n-4)*16))<=256){nv=n;q0=q}
+  }
+  if(q0<0)return null;
+  const num=o=>dv.getFloat64(o,true),word=o=>dv.getUint32(o,true),fine=v=>Math.abs(v)<20000&&(v===0||Math.abs(v)>1e-6);
+  const ok=o=>o>0&&o+24<=u8.length&&fine(num(o))&&fine(num(o+8))&&fine(num(o+16));
+  const clean=(o,n)=>{for(let i=0;i<n;i++)if(!ok(o+i*24))return false;return true};
+  const next=(o,p)=>!p||(Math.abs(num(o+16)-p[2])<200&&Math.hypot(num(o)-p[0],num(o+8)-p[1])<2500);
+  const start=q0+28,V=new Array(nv).fill(null),gaps=[];let shift=0,last=null;
+  for(let i=0;i<nv;i++){
+    const o=start+i*24+shift;
+    // A gap can land on a whole number, so every value still looks sound but x, y and z have changed places: height jumps.
+        // The right place is the one where the next points run on in small steps, as a real outline does.
+    let best=null;
+    const steady=x=>{
+      const n=Math.min(24,nv-i);let score=0;
+      if(!ok(x)||!next(x,last))return-1;
+      for(let j=1;j<n;j++){
+        const a=x+(j-1)*24,b=x+j*24;
+        if(!ok(b))return-1;
+        if(Math.hypot(num(a)-num(b),num(a+8)-num(b+8),num(a+16)-num(b+16))<250)score++;
+      }
+      return score;
+    };
+    const jump=last&&ok(o)&&Math.abs(num(o+16)-last[2])>250;
+    if(ok(o)&&(!jump||steady(o)>=12)){last=V[i]=[num(o),num(o+8),num(o+16)];continue}
+    for(let k=0;k<4&&i+k<nv;k++)for(let w=1;w<=96;w++)for(const d of [-w,w]){
+      if(!(d%24))continue;
+      const x=start+(i+k)*24+shift+d,score=steady(x);
+      if(score<Math.max(1,Math.min(16,nv-i-k-2)))continue;
+      // Places a whole number apart read just as smoothly with x, y and z swapped: the true one is nearest the last point.
+      const near=last?Math.hypot(num(x)-last[0],num(x+8)-last[1],num(x+16)-last[2]):0;
+      // The same place can be reached as a small shift or as a record skipped plus a larger shift: the small shift keeps the numbering.
+      if(!best||score>best.score||(score===best.score&&(near<best.near-1e-6||(Math.abs(near-best.near)<=1e-6&&Math.abs(d)<Math.abs(best.d)))))best={k,d,score,near};
+    }
+    if(!best){if(ok(o))last=V[i]=[num(o),num(o+8),num(o+16)];continue}
+    shift+=best.d;i+=best.k;gaps.push(i);
+    if(i>=nv)break;
+    const x=start+i*24+shift;last=V[i]=[num(x),num(x+8),num(x+16)];
+  }
+  const end=start+nv*24+shift,count=2*nv-4;let at=null;
+  for(let d=-140;d<=140&&at===null;d++){const o=end+d;if(word(o)===count&&word(o+4)===3)at=o+4}
+  for(let d=-140;d<=140&&at===null;d++){const o=end+d;let all=true;for(let i=0;i<10;i++)if(word(o+i*16)!==3)all=false;if(all)at=o}
+  if(at===null)return null;
+  const isFace=o=>o+16<=u8.length&&word(o)===3&&word(o+4)<nv&&word(o+8)<nv&&word(o+12)<nv,F=[];let fshift=0;
+  for(let i=0;i<count;i++){
+    const o=at+i*16+fshift;
+    if(isFace(o)&&(i>count-3||isFace(o+16))){F.push([word(o+4),word(o+8),word(o+12)]);continue}
+    let best=null;
+    for(let k=0;k<4&&i+k<count;k++)for(let w=1;w<=96;w++){
+      if(best&&w>=Math.abs(best.d))break;
+      for(const d of [-w,w]){let all=true;for(let e=0;e<Math.min(5,count-i-k);e++)if(!isFace(at+(i+k)*16+fshift+d+e*16))all=false;if(all){if(!best||w<Math.abs(best.d))best={k,d};break}}
+    }
+    if(!best)continue;
+    fshift+=best.d;i+=best.k;
+    const x=at+i*16+fshift;F.push([word(x+4),word(x+8),word(x+12)]);
+  }
+  const longEdges=P=>{let n=0;for(const t of F)for(let k=0;k<3;k++){const a=P[t[k]],b=P[t[(k+1)%3]];if(a&&b&&Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2])>250)n++}return n};
+  let P=V;
+  // Each stretch between gaps is numbered on its own: a later gap can put the numbering right again.
+  const marks=gaps.filter(g=>g<=nv-8);
+  marks.forEach((g,m)=>{
+    const stop=marks[m+1]??nv;
+    let best=P,fewest=longEdges(P);
+    for(const e of [-6,-5,-4,-3,-2,-1,1,2,3,4,5,6]){const Q=P.map((v,i)=>i>=g&&i<stop?(i+e>=g&&i+e<nv?P[i+e]:null):v),n=longEdges(Q);if(n<fewest){fewest=n;best=Q}}
+    P=best;
+  });
+  // A point lost in a gap takes the middle of its neighbours.
+  for(let pass=0;pass<8;pass++){
+    const add=new Map;
+    for(const t of F)for(let k=0;k<3;k++)for(const [x,y] of [[t[k],t[(k+1)%3]],[t[(k+1)%3],t[k]]])if(!P[x]&&P[y]){const s=add.get(x)||[0,0,0,0];for(let j=0;j<3;j++)s[j]+=P[y][j];s[3]++;add.set(x,s)}
+    for(const [k,s] of add)P[k]=[s[0]/s[3],s[1]/s[3],s[2]/s[3]];
+  }
+  P.length=nv;
+  if(Array.from(P).some(v=>!v))return null;
+  const key=(a,b)=>a<b?a+'_'+b:b+'_'+a,edges=t=>[[t[0],t[1]],[t[1],t[2]],[t[2],t[0]]],used=new Map;
+  let T=F.filter(t=>t[0]!==t[1]&&t[1]!==t[2]&&t[0]!==t[2]);
+  for(const t of T)for(const [a,b] of edges(t))used.set(key(a,b),(used.get(key(a,b))||0)+1);
+  T=T.filter(t=>!edges(t).some(([a,b])=>used.get(key(a,b))>2));
+  // Holes left by a gap are closed with a fan of faces.
+  const dir=new Set,after=new Map,seen=new Set;
+  for(const t of T)for(const [a,b] of edges(t))dir.add(a+'>'+b);
+  for(const t of T)for(const [a,b] of edges(t))if(!dir.has(b+'>'+a)){if(!after.has(b))after.set(b,[]);after.get(b).push(a)}
+  for(const s of [...after.keys()]){
+    if(seen.has(s))continue;
+    const L=[];let v=s;
+    for(let g=0;g<500;g++){L.push(v);seen.add(v);const n=(after.get(v)||[]).find(x=>!seen.has(x)||x===s);if(n===undefined||n===s)break;v=n}
+    if(L.length>=3)for(let i=1;i<L.length-1;i++)T.push([L[0],L[i],L[i+1]]);
+  }
+  const pos=new Float32Array(nv*3);P.slice(0,nv).forEach((p,i)=>pos.set(p,i*3));
+  return{nv,pos,tris:T.flat(),faces:T.length,bad:0,skipped:0,offset:q0,damaged:new Set,held:[],fine:true};
+}
+function parseAdv(buf,file,sections=[]){
+  const u8=new Uint8Array(buf),dv=new DataView(buf);
+  if(u8.length<200||[...u8.subarray(0,16)].map(b=>b.toString(16).padStart(2,'0')).join('')!==MAGIC)throw new Error('Not a recognised .adv file');
+  const f=readFields(u8,dv);
+  const meshes=findAll(u8,MESH_TAG).map(p=>parseMesh(u8,dv,p)).filter(Boolean);
+  for(const part of sections){
+    const view=new DataView(part.buffer);
+    meshes.push(...findAll(part,MESH_TAG).map(p=>parseMesh(part,view,p)).filter(Boolean));
+  }
+  // The rough is the outline whose volume gives the stored rough weight, and the most detailed
+  // one among those that fit about equally well. Detailed outlines are damaged in some files.
+  const wanted=dv.getFloat64(68,true)*200/3.52,miss=m=>Math.abs(volumeMm3(m)-wanted);
+  let outlines=meshes.filter(m=>m.bad===0&&m.nv>=40&&m.tris.length).sort((a,b)=>miss(a)-miss(b));
+  // With no clean outline, one with a few damaged points is used if its volume still gives the rough weight.
+  if(!outlines.length||miss(outlines[0])>wanted*.2){
+    const hurt=meshes.filter(m=>m.bad>0&&m.bad<m.nv*.02&&m.nv>=40&&m.tris.length&&miss(m)<=wanted*.05).sort((a,b)=>miss(a)-miss(b));
+    if(hurt.length){repairMesh(hurt[0]);if(hurt[0].bad===0)outlines=[hurt[0],...outlines]}
+  }
+  let stone=outlines.length?outlines.filter(m=>miss(m)<=miss(outlines[0])*1.25+wanted*.01).sort((a,b)=>b.tris.length-a.tris.length)[0]:null;
+  // The fine model is used only when its weight agrees with the file's rough weight.
+  const fineModel=fineRough(buf);
+  if(fineModel&&miss(fineModel)<=wanted*.04)stone=fineModel;
+  const repaired=!!stone&&stone.nv<=800;
+  const incStarts=findAll(u8,ascii(' - (3D)'));
+  const inclusions=[];let dropped=0,drawnInclusions=0,pointInfo=null;
+  if(stone){
+    const bb=bbox(stone),d=Math.hypot(...bb.hi.map((h,i)=>h-bb.lo[i]));
+    const inStone=m=>{
+      const b=bbox(m);
+      return Math.hypot(...b.hi.map((h,i)=>h-b.lo[i]))<=d*.6&&!b.lo.some((v,i)=>v<bb.lo[i]-d*.05)&&!b.hi.some((v,i)=>v>bb.hi[i]+d*.05);
+    };
+    // Each inclusion stores its real pieces first, then merged copies of them. A mesh whose box
+    // holds an earlier piece is one of those copies, so it is left out.
+    const holds=(o,i)=>o.lo.every((v,k)=>v-1<=i.lo[k])&&o.hi.every((v,k)=>v+1>=i.hi[k]);
+    let k=0;
+    incStarts.forEach((start,n)=>{
+      const stop=incStarts[n+1]??start+300000,kept=[],state=u8[start+7+47];
+      while(k<meshes.length&&meshes[k].offset<start)k++;
+      for(let j=k;j<meshes.length&&meshes[j].offset<stop;j++){
+        const m=meshes[j];
+        if(m===stone||m.bad||m.tris.length<3||!inStone(m))continue;
+        const box=bbox(m);
+        if(kept.some(o=>holds(box,o)))continue;
+        kept.push(box);inclusions.push({mesh:m,state,id:n,ignored:state===0,stateAt:start+7+47});
+      }
+      if(kept.length)drawnInclusions++;else dropped++;
+    });
+    // In compressed sections each inclusion has its own section. Its state cannot be changed there.
+    const nameEnd=ascii(' - (3D)');
+    let id=incStarts.length;
+    for(const part of sections){
+      const at=findAll(part,nameEnd)[0];
+      if(at===undefined)continue;
+      const state=part[at+7+47];
+      const real=zippedPieces(part,new DataView(part.buffer),at+7+75).filter(m=>m.tris.length>=3&&inStone(m));
+      for(const mesh of real)inclusions.push({mesh,state,id,ignored:state===0});
+      if(real.length)drawnInclusions++;else dropped++;
+      id++;
+    }
+    // No inclusion shapes in the file: read the raw inclusion points and group them into inclusions.
+    if(!inclusions.length&&sections.length){
+      const raw=rawInclusionPoints(sections,stone);
+      if(raw.pts.length){
+        const groups=groupPoints(raw.pts);
+        groups.forEach((list,k)=>inclusions.push({mesh:pointMesh(raw.pts,list,raw.inside),state:1,id:k,ignored:false,fromPoints:true}));
+        drawnInclusions=groups.length;
+        pointInfo={pieces:raw.pieces,points:raw.read,skipped:raw.dropped,inclusions:groups.length};
+      }
+    }
+  }
+  const parts=[1,2,3].map(n=>({
+    shape:f[`Result.${n}.Shapename`],weight:+f[`Result.${n}.PartWeight`],
+    usage:+f[`Result.${n}.PartUsage`],polish:+f[`Result.${n}.PolishWeightDouble`]
+  })).filter(p=>/^[A-Z]{3,}$/.test(p.shape||'')).map(p=>({...p,polish:p.polish||+(p.weight*p.usage/100).toFixed(3)}));
+  const sawAt=findAll(u8,new Uint8Array(new Float64Array([-12345]).buffer))[0];
+  const sawNormal=sawAt>60?[0,1,2].map(i=>dv.getFloat64(sawAt-60+8*i,true)):null;
+  const sawOffset=sawAt>60?dv.getFloat64(sawAt-36,true):0;
+  const fileSawWidth=sawAt>60?dv.getFloat64(sawAt-28,true):0;
+  const plannedStones=currentPlan(u8,dv,parts.length,f);
+  plannedStones.forEach(r=>r.mesh=brilliant(r,r.prop));
+  // The plan's saws are the first named plates in the file: SawN-k, or a chain PieN-k that wraps one stone and a saw
+  // that runs up to it. Direction sits 32 bytes before the name, position 48 and thickness 56.
+  const fileSaws=[];
+  if(plannedStones.length>1){
+    const names=[];
+    for(const word of ['Saw','Pie'])for(const at of findAll(u8,ascii(word))){
+      let e=at+3;
+      while(e<at+12&&((u8[e]>=48&&u8[e]<=57)||u8[e]===45))e++;
+      if(/^(Saw|Pie)\d+-\d+$/.test(String.fromCharCode(...u8.subarray(at,e))))names.push(at);
+    }
+    names.sort((a,b)=>a-b);
+    const lead=[];
+    for(const at of names){if(lead.length&&at-lead[lead.length-1]>PLATE_GAP)break;lead.push(at)}
+    const across=(r,n,d)=>{
+      let lo=Infinity,hi=-Infinity;const P=r.mesh.pos;
+      for(let i=0;i<P.length;i+=3){const v=P[i]*n[0]+P[i+1]*n[1]+P[i+2]*n[2]-d;if(v<lo)lo=v;if(v>hi)hi=v}
+      return[lo,hi];
+    };
+    // Some records drop one zero byte from a direction number, so they are a byte short. It goes back where the direction comes out exact.
+    const whole=(at)=>{const n=[0,1,2].map(i=>dv.getFloat64(at+8*i,true));return Math.abs(Math.hypot(...n)-1)<1e-9?n:null};
+    const mended=at=>{
+      const b=new Uint8Array(24),v=new DataView(b.buffer);
+      for(let pos=23;pos>=0;pos--)for(let value=0;value<256;value++){
+        b.fill(0);b.set(u8.subarray(at,at+pos),0);b[pos]=value;b.set(u8.subarray(at+pos,at+23),pos+1);
+        const n=[0,1,2].map(i=>v.getFloat64(8*i,true));
+        if(Math.abs(Math.hypot(...n)-1)<1e-9)return n;
+      }
+      return null;
+    };
+    const plates=lead.map(at=>{
+      const fits=(normal,from)=>{
+        if(!normal)return null;
+        const width=dv.getFloat64(from-24,true),off=dv.getFloat64(from-16,true);
+        return width>=5&&width<=200&&Math.abs(off)<20000?{normal,width,offset:off-width/2,pie:u8[at]===80,within:[],stops:[],avoid:[]}:null;
+      };
+      return fits(whole(at-32),at-32)||fits(mended(at-31),at-31);
+    }).filter(Boolean);
+    // Three stones take two planes: a saw across the whole rough with no stone on it, and a pie that divides the
+    // other two and stops at the saw. The file's other plates are not needed.
+    if(plannedStones.length===3&&plates.length>2){
+      const divide=(w,list)=>{
+        const span=list.map(r=>across(r,w.normal,w.offset));
+        if(span.some(([lo,hi])=>lo<-PLATE_CLEAR&&hi>PLATE_CLEAR))return null;
+        const up=list.filter((r,k)=>span[k][0]+span[k][1]>0),down=list.filter(r=>!up.includes(r));
+        return up.length&&down.length?{up,down}:null;
+      };
+      let best=null;
+      for(const first of plates){
+        const a=divide(first,plannedStones);
+        if(!a)continue;
+        const two=a.up.length===2?a.up:a.down;
+        for(const second of plates){
+          if(second===first||!divide(second,two))continue;
+          const rank=(first.pie?0:2)+(second.pie?1:0);
+          if(!best||rank>best.rank)best={rank,first,second};
+        }
+      }
+      if(!best){
+        // No stored plate runs clean across the rough: the saw is worked out from the stones, and marked as calculated.
+        const width=plates[0].width,dots=r=>{const P=r.mesh.pos,o=[];for(let i=0;i<P.length;i+=3)o.push([P[i],P[i+1],P[i+2]]);return o};
+        for(const one of plannedStones){
+          const two=plannedStones.filter(r=>r!==one),g=clearestGap(dots(one),two.flatMap(dots));
+          if(g.gap<width||(best&&g.gap<=best.gap))continue;
+          const first={normal:g.n,offset:g.off,width,pie:false,within:[],stops:[],avoid:[],calculated:true};
+          const second=plates.filter(w=>divide(w,two))[0];
+          const h=second?null:clearestGap(dots(two[0]),dots(two[1]));
+          if(!second&&h.gap<width)continue;
+          best={gap:g.gap,first,second:second||{normal:h.n,offset:h.off,width,pie:false,within:[],stops:[],avoid:[],calculated:true}};
+        }
+      }
+      if(best){
+        best.first.pie=false;best.second.pie=false;
+        plates.length=0;plates.push(best.first,best.second);
+      }
+    }
+    const chain=plates.filter(w=>w.pie),saws=plates.filter(w=>!w.pie);
+    if(chain.length){
+      // A pie is one bent cut around a stone: its plates meet at corners, each ending where the next begins.
+      // The saw runs up to the bent cut and stops there.
+      const touch=(r,w)=>{const [lo,hi]=across(r,w.normal,w.offset),edge=w.width/2+PLATE_CLEAR;return Math.abs(lo)<=edge?1:Math.abs(hi)<=edge?-1:0};
+      const inner=[...plannedStones].sort((a,b)=>chain.filter(w=>touch(b,w)).length-chain.filter(w=>touch(a,w)).length)[0];
+      const around=chain.filter(w=>touch(inner,w));
+      const wedge=around.map(w=>{const k=touch(inner,w);return[w.normal[0]*k,w.normal[1]*k,w.normal[2]*k,w.offset*k]});
+      around.forEach((w,i)=>{w.stops=wedge.filter((_,k)=>k!==i);w.around=touch(inner,w);w.cross=saws});
+      for(const w of saws)w.avoid=wedge;
+      plates.length=0;plates.push(...around,...saws);
+    }else if(saws.length>1){
+      // The second saw stays in the part the first leaves with two stones.
+      const first=saws[0],up=plannedStones.filter(r=>across(r,first.normal,first.offset)[0]>-PLATE_CLEAR).length,keep=up>=plannedStones.length-up?1:-1;
+      saws[1].within=[[first.normal[0]*keep,first.normal[1]*keep,first.normal[2]*keep,first.offset*keep+first.width/2]];
+    }
+    fileSaws.push(...plates);
+  }
+  const images=findImages(u8,file);
+  const rough=+f['stone.RoughWeight']||dv.getFloat64(68,true);
+  const polished=+f['Result.cur.TotalPolishWeight']||0;
+  return{
+    file,name:f['stone.Name']||file.name.replace(/\.adv$/i,''),fields:f,pointInfo,repaired,plannedStones,drawnInclusions,sawNormal,sawOffset,fileSawWidth,fileSaws,rough,polished,parts,stone,inclusions,dropped,
+    images,frames:images.filter(i=>i.w===1024).map((f,index)=>Object.assign(f,{index})),pose:readScanPose(u8,dv),options:namedOptions(u8,dv),
+    saved:new Date(Number(dv.getBigInt64(60,true)&0x3fffffffffffffffn)/1e4-11644473600000),
+    color:f['Stone.color'],clarity:f['Stone.clarity'],depth:+f['Result.Cur.TotalDepth_%'],
+    incTotal:+f['Stone.TotalNumberOfInclusions']||drawnInclusions+dropped,incUse:+f['inclusions.count.state.Use'],
+    incAuto:+f['inclusions.count.state.auto'],incIgnore:+f['inclusions.count.state.Ignore'],
+    meshCount:+f['inclusions.count.meshes'],
+    volume:stone?volumeMm3(stone):0
+  };
+}
+
+
+</script>
+<script>
+(()=>{
+'use strict';
+const DENSITY=3.50874,PIT_SCALE=100,DIRECTIONS=4000;
+const $=id=>document.getElementById(id);
+const view={R:[1,0,0,0,1,0,0,0,1],zoom:1,mode:'solid',pits:true,stones:true,limit:0};
+const STEP=15,FAR=100;
+let panels=[],lastFile=null,lastShift=[0,0,0],source=null;
+
+function roughModels(buf){
+  const u8=new Uint8Array(buf),dv=new DataView(buf),found=findAll(u8,MESH_TAG).map(p=>parseMesh(u8,dv,p)).filter(Boolean);
+  for(const part of unzipSections(buf)){const v=new DataView(part.buffer);found.push(...findAll(part,MESH_TAG).map(p=>parseMesh(part,v,p)).filter(Boolean))}
+  const sound=found.filter(m=>m.bad===0&&m.nv>=40&&m.tris.length);
+  const top=Math.max(0,...sound.map(volumeMm3));
+  const rough=sound.filter(m=>volumeMm3(m)>top*.5),groups=new Map;
+  for(const m of rough){const key=m.nv+'_'+volumeMm3(m).toFixed(5);if(!groups.has(key))groups.set(key,{mesh:m,copies:0});groups.get(key).copies++}
+  return{list:[...groups.values()].sort((a,b)=>b.mesh.nv-a.mesh.nv),sound:sound.length,damaged:found.filter(m=>m.bad>0&&m.nv>=40&&volumeMm3(m)>top*.5).length};
+}
+// Each stone's surface cut into small pieces, so the gold edge can follow the rough closely.
+function stoneSkin(r,shift){
+  const stone={...r,center:r.center.map((v,k)=>v+shift[k])},m=brilliant(stone,r.prop),P=m.pos,T=m.tris,pts=[],pos=[],nor=[],ref=[];
+  for(let t=0;t<T.length;t+=3){
+    const v=[0,1,2].map(j=>[0,1,2].map(q=>P[T[t+j]*3+q])),a=v[1].map((e,q)=>e-v[0][q]),b=v[2].map((e,q)=>e-v[0][q]);
+    const c=[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],len=Math.hypot(...c);
+    if(len<1e-9)continue;
+    const f=c.map(e=>e/len),k=Math.max(1,Math.ceil(Math.max(Math.hypot(...a),Math.hypot(...b),Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]))/STEP)),first=pts.length/3,row=[];
+    for(let i=0;i<=k;i++){row[i]=pts.length/3;for(let j=0;j<=k-i;j++)pts.push(...v[0].map((e,q)=>e+i/k*a[q]+j/k*b[q]))}
+    const at=(i,j)=>row[i]+j,put=(...q)=>{for(const n of q){ref.push(n);pos.push(pts[n*3],pts[n*3+1],pts[n*3+2]);nor.push(...f)}};
+    for(let i=0;i<k;i++)for(let j=0;j<k-i;j++){put(at(i,j),at(i+1,j),at(i,j+1));if(j<k-i-1)put(at(i+1,j),at(i+1,j+1),at(i,j+1))}
+  }
+  return{D:r.D,pts:Float32Array.from(pts),pos:Float32Array.from(pos),nor:Float32Array.from(nor),ref:Int32Array.from(ref)};
+}
+function pointToTriangle(p,a,b,c){
+  const sub=(u,v)=>[u[0]-v[0],u[1]-v[1],u[2]-v[2]],dot=(u,v)=>u[0]*v[0]+u[1]*v[1]+u[2]*v[2],gap=q=>{const w=sub(p,q);return dot(w,w)};
+  const ab=sub(b,a),ac=sub(c,a),ap=sub(p,a),d1=dot(ab,ap),d2=dot(ac,ap);
+  if(d1<=0&&d2<=0)return gap(a);
+  const bp=sub(p,b),d3=dot(ab,bp),d4=dot(ac,bp);
+  if(d3>=0&&d4<=d3)return gap(b);
+  const vc=d1*d4-d3*d2;
+  if(vc<=0&&d1>=0&&d3<=0){const v=d1/(d1-d3);return gap(a.map((e,i)=>e+v*ab[i]))}
+  const cp=sub(p,c),d5=dot(ab,cp),d6=dot(ac,cp);
+  if(d6>=0&&d5<=d6)return gap(c);
+  const vb=d5*d2-d1*d6;
+  if(vb<=0&&d2>=0&&d6<=0){const w=d2/(d2-d6);return gap(a.map((e,i)=>e+w*ac[i]))}
+  const va=d3*d6-d5*d4;
+  if(va<=0&&d4-d3>=0&&d5-d6>=0){const w=(d4-d3)/(d4-d3+d5-d6);return gap(b.map((e,i)=>e+w*(c[i]-b[i])))}
+  const s=1/(va+vb+vc),v=vb*s,w=vc*s;return gap(a.map((e,i)=>e+ab[i]*v+ac[i]*w));
+}
+// Distance from a point to the rough: above zero inside the rough, below zero outside it.
+function roughField(m){
+  const P=m.pos,T=m.tris,N=T.length/3,corner=(t,j)=>{const v=T[t*3+j]*3;return[P[v],P[v+1],P[v+2]]},big=N>2000,CELL=50,cells=new Map,cols=new Map;
+  const all=Array.from({length:N},(_,i)=>i);
+  if(big)for(let t=0;t<N;t++){
+    const q=[corner(t,0),corner(t,1),corner(t,2)],l=[0,1,2].map(k=>Math.floor(Math.min(q[0][k],q[1][k],q[2][k])/CELL)),h=[0,1,2].map(k=>Math.floor(Math.max(q[0][k],q[1][k],q[2][k])/CELL));
+    for(let x=l[0];x<=h[0];x++)for(let y=l[1];y<=h[1];y++){
+      const c=x+','+y;if(!cols.has(c))cols.set(c,[]);cols.get(c).push(t);
+      for(let z=l[2];z<=h[2];z++){const e=c+','+z;if(!cells.has(e))cells.set(e,[]);cells.get(e).push(t)}
+    }
+  }
+  const inside=(x,y,z)=>{
+    x+=.01373;y+=.00719;
+    const list=big?cols.get(Math.floor(x/CELL)+','+Math.floor(y/CELL))||[]:all;let n=0;
+    for(const t of list){
+      const a=corner(t,0),b=corner(t,1),c=corner(t,2),d=(b[1]-c[1])*(a[0]-c[0])+(c[0]-b[0])*(a[1]-c[1]);
+      if(!d)continue;
+      const u=((b[1]-c[1])*(x-c[0])+(c[0]-b[0])*(y-c[1]))/d,v=((c[1]-a[1])*(x-c[0])+(a[0]-c[0])*(y-c[1]))/d,w=1-u-v;
+      if(u>=0&&v>=0&&w>=0&&u*a[2]+v*b[2]+w*c[2]>z)n++;
+    }
+    return n%2===1;
+  };
+  return(x,y,z)=>{
+    let best=FAR*FAR;const p=[x,y,z],seen=new Set;
+    const test=t=>{const d=pointToTriangle(p,corner(t,0),corner(t,1),corner(t,2));if(d<best)best=d};
+    if(big){
+      const cx=Math.floor(x/CELL),cy=Math.floor(y/CELL),cz=Math.floor(z/CELL);
+      for(let i=-2;i<=2;i++)for(let j=-2;j<=2;j++)for(let k=-2;k<=2;k++)for(const t of cells.get((cx+i)+','+(cy+j)+','+(cz+k))||[])if(!seen.has(t)){seen.add(t);test(t)}
+    }else all.forEach(test);
+    const d=Math.sqrt(best);return inside(x,y,z)?d:-d;
+  };
+}
+// How far each point lies below the tight outer wrap of the model. A pit shows as a deep point.
+function pitDepths(m){
+  const P=m.pos,n=m.nv,out=new Float32Array(n).fill(Infinity),gold=Math.PI*(3-Math.sqrt(5));
+  for(let k=0;k<DIRECTIONS;k++){
+    const z=1-2*(k+.5)/DIRECTIONS,r=Math.sqrt(1-z*z),x=r*Math.cos(k*gold),y=r*Math.sin(k*gold);
+    let h=-Infinity;
+    for(let i=0;i<n;i++){const d=P[i*3]*x+P[i*3+1]*y+P[i*3+2]*z;if(d>h)h=d}
+    for(let i=0;i<n;i++){const g=h-(P[i*3]*x+P[i*3+1]*y+P[i*3+2]*z);if(g<out[i])out[i]=g}
+  }
+  return out;
+}
+const mix=(a,b,t)=>a.map((v,i)=>v+(b[i]-v)*t);
+const LOW=[.56,.64,.72],MID=[.95,.76,.31],HIGH=[.88,.28,.18];
+const pitColour=d=>{const t=Math.min(1,d/PIT_SCALE);return t<.5?mix(LOW,MID,t*2):mix(MID,HIGH,t*2-1)};
+
+const VS=`attribute vec3 p;attribute vec3 n;attribute vec3 c;attribute float d;uniform mat3 R;uniform vec3 mid;uniform float s;uniform float nudge;varying vec3 vc;varying vec3 vn;varying float vd;
+void main(){vec3 q=R*(p-mid)*s;vn=R*n;vc=c;vd=d;gl_Position=vec4(q.x,q.y,-q.z*.5-nudge,1.);}`;
+const FS=`precision highp float;varying vec3 vc;varying vec3 vn;varying float vd;uniform float flat_;uniform float alpha;uniform float limit;uniform vec3 ink;
+void main(){if(flat_>.5){gl_FragColor=vec4(ink,alpha);return;}float l=.35+.65*abs(normalize(vn).z);vec3 b=vd<limit?vec3(1.,.78,.1):vc;gl_FragColor=vec4(b*l,alpha);}`;
+function shader(gl,type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s}
+function makePanel(group,centre,scale,index,skins){
+  const {mesh:m,copies}=group,card=document.createElement('div');card.className='card';
+  const canvas=document.createElement('canvas'),depths=pitDepths(m),worst=Math.max(...depths);
+  const ct=volumeMm3(m)*DENSITY/200,faces=m.faces;
+  card.innerHTML=`<h2>${m.fine?'Fine model':`Model ${index+1}`}: ${m.nv.toLocaleString()} points</h2>`;card.append(canvas);
+  const note=document.createElement('p');note.textContent=`${faces.toLocaleString()} faces, ${ct.toFixed(4)} ct, deepest pit ${Math.round(worst)} µm${copies>1?`, stored ${copies} times`:''}`;card.append(note);
+  const report=document.createElement('ul');card.append(report);
+  const field=roughField(m),rows=skins.map(k=>{const d=new Float32Array(k.pts.length/3);for(let i=0;i<d.length;i++)d[i]=field(k.pts[i*3],k.pts[i*3+1],k.pts[i*3+2]);return{skin:k,clear:d,closest:d.reduce((a,b)=>Math.min(a,b),Infinity)}});
+  const showReport=()=>{report.innerHTML='';rows.forEach((r,i)=>{const li=document.createElement('li'),mm=(r.skin.D/1000).toFixed(3);let gold=0;for(const v of r.clear)if(v<view.limit)gold++;
+    li.textContent=r.closest<0?`Stone ${i+1}, ${mm} mm: outside by ${Math.ceil(-r.closest)} µm`:`Stone ${i+1}, ${mm} mm: inside, closest ${Math.floor(r.closest)} µm`;
+    if(gold)li.textContent+=`, gold on ${(gold/r.clear.length*100).toFixed(1)}%`,li.className='out';report.append(li)})};
+  const gl=canvas.getContext('webgl',{antialias:true});
+  if(!gl)throw new Error('This browser cannot draw 3D (WebGL is off).');
+  const prog=gl.createProgram();gl.attachShader(prog,shader(gl,gl.VERTEX_SHADER,VS));gl.attachShader(prog,shader(gl,gl.FRAGMENT_SHADER,FS));gl.linkProgram(prog);gl.useProgram(prog);
+  const T=m.tris,P=m.pos,N=T.length,pos=new Float32Array(N*3),nor=new Float32Array(N*3),col=new Float32Array(N*3),plain=new Float32Array(N*3);
+  for(let t=0;t<N;t+=3){
+    const v=[T[t],T[t+1],T[t+2]],A=[0,1,2].map(k=>P[v[0]*3+k]),B=[0,1,2].map(k=>P[v[1]*3+k]),C=[0,1,2].map(k=>P[v[2]*3+k]);
+    const u=B.map((x,k)=>x-A[k]),w=C.map((x,k)=>x-A[k]),cr=[u[1]*w[2]-u[2]*w[1],u[2]*w[0]-u[0]*w[2],u[0]*w[1]-u[1]*w[0]],len=Math.hypot(...cr)||1;
+    for(let c=0;c<3;c++){const at=(t+c)*3;pos.set([A,B,C][c],at);nor.set(cr.map(x=>x/len),at);col.set(pitColour(depths[v[c]]),at);plain.set(LOW,at)}
+  }
+  const seen=new Set,edge=[];
+  for(let t=0;t<N;t+=3)for(const [a,b] of [[T[t],T[t+1]],[T[t+1],T[t+2]],[T[t+2],T[t]]]){const k=a<b?a*1e6+b:b*1e6+a;if(seen.has(k))continue;seen.add(k);edge.push(P[a*3],P[a*3+1],P[a*3+2],P[b*3],P[b*3+1],P[b*3+2])}
+  const lines=new Float32Array(edge),buffer=d=>{const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,d,gl.STATIC_DRAW);return b};
+  const buffer1=buffer,bPos=buffer(pos),bNor=buffer(nor),bCol=buffer(col),bPlain=buffer(plain),bLine=buffer(lines);
+  const loc=n=>gl.getAttribLocation(prog,n),u=n=>gl.getUniformLocation(prog,n),aP=loc('p'),aN=loc('n'),aC=loc('c');
+  const attr=(a,b)=>{gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,3,gl.FLOAT,false,0,0)};
+  const stoneBuffers=rows.map(r=>{const v=new Float32Array(r.skin.ref.length);r.skin.ref.forEach((n,i)=>v[i]=Math.max(-999,Math.min(999,r.clear[n])));return{pos:buffer(r.skin.pos),nor:buffer(r.skin.nor),col:buffer(new Float32Array(r.skin.pos.length).map((_,i)=>[.72,.85,.97][i%3])),d:buffer1(v),n:r.skin.ref.length}});
+  const aD=loc('d');
+  gl.enable(gl.DEPTH_TEST);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);gl.clearColor(.05,.06,.075,1);
+  gl.uniform3fv(u('mid'),centre);
+  const draw=()=>{
+    const dpr=window.devicePixelRatio||1,w=Math.round(canvas.clientWidth*dpr);
+    if(canvas.width!==w||canvas.height!==w){canvas.width=w;canvas.height=w}
+    gl.viewport(0,0,w,w);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+    const R=view.R;gl.uniformMatrix3fv(u('R'),false,[R[0],R[3],R[6],R[1],R[4],R[7],R[2],R[5],R[8]]);
+    gl.uniform1f(u('s'),scale*view.zoom);
+    const see=view.stones&&rows.length>0;
+    gl.uniform1f(u('limit'),view.limit);gl.uniform1f(u('nudge'),0);
+    if(see){
+      gl.disable(gl.BLEND);gl.depthMask(true);gl.uniform1f(u('flat_'),0);gl.uniform1f(u('alpha'),1);
+      for(const b of stoneBuffers){attr(aP,b.pos);attr(aN,b.nor);attr(aC,b.col);gl.bindBuffer(gl.ARRAY_BUFFER,b.d);gl.enableVertexAttribArray(aD);gl.vertexAttribPointer(aD,1,gl.FLOAT,false,0,0);gl.drawArrays(gl.TRIANGLES,0,b.n)}
+      gl.enable(gl.BLEND);gl.depthMask(false);
+    }else{gl.disable(gl.BLEND);gl.depthMask(true)}
+    gl.disableVertexAttribArray(aD);gl.vertexAttrib1f(aD,999);
+    if(view.mode!=='lines'){
+      gl.uniform1f(u('flat_'),0);gl.uniform1f(u('alpha'),see?.22:1);attr(aP,bPos);attr(aN,bNor);attr(aC,view.pits?bCol:bPlain);gl.drawArrays(gl.TRIANGLES,0,N);
+    }
+    if(view.mode!=='solid'){
+      gl.uniform1f(u('flat_'),1);gl.uniform1f(u('alpha'),see?.35:1);gl.uniform3fv(u('ink'),view.mode==='lines'||see?[.8,.86,.93]:[.08,.1,.13]);gl.uniform1f(u('nudge'),.002);attr(aP,bLine);gl.disableVertexAttribArray(aN);gl.disableVertexAttribArray(aC);gl.drawArrays(gl.LINES,0,lines.length/3);
+    }
+    gl.depthMask(true);
+  };
+  let last=null;
+  canvas.addEventListener('pointerdown',e=>{last=[e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId)});
+  canvas.addEventListener('pointermove',e=>{if(!last)return;turn((e.clientX-last[0])*.008,(e.clientY-last[1])*.008);last=[e.clientX,e.clientY]});
+  canvas.addEventListener('pointerup',()=>last=null);
+  canvas.addEventListener('wheel',e=>{e.preventDefault();view.zoom=Math.min(12,Math.max(.4,view.zoom*Math.exp(-e.deltaY*.0015)));drawAll()},{passive:false});
+  $('grid').append(card);
+  showReport();
+  return{draw,showReport};
+}
+const times=(a,b)=>[0,1,2].flatMap(r=>[0,1,2].map(c=>a[r*3]*b[c]+a[r*3+1]*b[c+3]+a[r*3+2]*b[c+6]));
+function turn(ax,ay){
+  const cy=Math.cos(ax),sy=Math.sin(ax),cx=Math.cos(ay),sx=Math.sin(ay);
+  view.R=times([1,0,0,0,cx,sx,0,-sx,cx],times([cy,0,sy,0,1,0,-sy,0,cy],view.R));drawAll();
+}
+const drawAll=()=>panels.forEach(p=>p.draw());
+async function showFile(file,shift=[0,0,0]){
+  $('info').textContent=`Reading ${file.name}...`;$('grid').textContent='';panels=[];
+  try{
+    lastFile=file;lastShift=shift;
+    const buf=await file.arrayBuffer(),{list,damaged}=roughModels(buf),s=parseAdv(buf,file,unzipSections(buf));
+    const wanted=s.rough,own=fineRough(buf),fromSource=source?fineRough(await source.arrayBuffer()):null;
+    const fits=m=>m&&Math.abs(volumeMm3(m)*DENSITY/200-wanted)<=wanted*.03,fine=fits(fromSource)?fromSource:fits(own)?own:null;
+    if(fine)list.unshift({mesh:fine,copies:1});
+    if(!list.length)throw new Error('no rough model found in this file');
+    $('empty').hidden=true;
+    await new Promise(r=>setTimeout(r));
+    const biggest=list[0].mesh,lo=[0,1,2].map(k=>{let a=Infinity;for(let i=k;i<biggest.pos.length;i+=3)a=Math.min(a,biggest.pos[i]);return a}),hi=[0,1,2].map(k=>{let a=-Infinity;for(let i=k;i<biggest.pos.length;i+=3)a=Math.max(a,biggest.pos[i]);return a});
+    const centre=lo.map((v,k)=>(v+hi[k])/2),span=Math.max(...hi.map((v,k)=>v-lo[k]));
+    const skins=(s.plannedStones||[]).filter(r=>r.prop&&r.D>0).map(r=>stoneSkin(r,shift));
+    panels=[];
+    for(let i=0;i<list.length;i++){$('info').textContent=`Measuring stones against model ${i+1} of ${list.length}...`;await new Promise(r=>setTimeout(r));panels.push(makePanel(list[i],centre,1.75/span,i,skins))}
+    drawAll();
+    $('info').textContent=`${file.name}: ${list.length} different rough model${list.length>1?'s':''}, all at the same scale and turn.${fine?'':' No fine model could be read from this file: press Fine rough from original and choose Advisor\'s original of this stone.'} ${s.plannedStones?.length||0} stone${s.plannedStones?.length===1?'':'s'} in the plan.${damaged?` ${damaged} damaged model${damaged>1?'s':''} left out.`:''}`;
+  }catch(e){$('info').textContent=`Could not read ${file.name}: ${e.message}`}
+}
+window.showRoughFile=showFile;
+const useSource=f=>{source=f;if(lastFile)return showFile(lastFile,lastShift)};
+window.setRoughSource=useSource;
+$('source').addEventListener('change',e=>{if(e.target.files[0])useSource(e.target.files[0])});
+$('file').addEventListener('change',e=>{if(e.target.files[0])showFile(e.target.files[0])});
+addEventListener('dragover',e=>e.preventDefault());
+addEventListener('drop',e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f)showFile(f)});
+$('modes').addEventListener('click',e=>{const m=e.target.dataset.mode;if(!m)return;view.mode=m;for(const b of $('modes').children)b.classList.toggle('on',b===e.target);drawAll()});
+$('pits').addEventListener('change',e=>{view.pits=e.target.checked;$('legend').hidden=!view.pits;$('legend').style.display=view.pits?'':'none';drawAll()});
+$('stones').addEventListener('change',e=>{view.stones=e.target.checked;drawAll()});
+$('limit').addEventListener('input',e=>{view.limit=+e.target.value;$('limitText').textContent=view.limit?`${view.limit} µm`:'0 µm (only outside)';panels.forEach(p=>p.showReport());drawAll()});
+$('reset').addEventListener('click',()=>{view.R=[1,0,0,0,1,0,0,0,1];view.zoom=1;drawAll()});
+addEventListener('resize',drawAll);
+})();
+</script>
+</body></html>

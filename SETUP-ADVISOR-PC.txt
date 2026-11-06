@@ -1,0 +1,73 @@
+SETTING UP THE PLANNER ON THE ADVISOR PC
+
+WHAT YOU NEED
+- The MY BOOK drive connected (it shows as F:).
+- Chrome or Edge.
+- Advisor 7.601 open.
+
+1. COPY THE PROGRAM
+Copy this folder from the drive to the Desktop of the Advisor PC:
+    F:\autook\planner-for-advisor-pc
+Rename the copy to planner-new. Do not copy it over the older folder on the Desktop:
+that folder may hold notes and fixes from the Claude Code session on the PC.
+
+2. OPEN THE PROGRAM
+Double-click adv-viewer.html in planner-new. If it opens in another browser,
+right-click it, choose Open with, then Chrome.
+Keep the viewer folder beside it.
+
+3. CHECK THE SETTINGS
+Open any stone, then the Cut limits tab, and check:
+    Rough safety 5        Inclusion safety 10
+    Rough diamond cost    enter your cost per carat
+There should be no Pit safety box. If there is, this is the old copy.
+
+4. RUN BULK PLAN
+Press Bulk plan and choose:
+    Stone folder    F:\autook\401-500  (or the folder of your 100 stones)
+    Output folder   F:\autook\bulk-output  (make this new, empty folder first)
+    Export folder   F:\autook\bulk-export  (make this new, empty folder first)
+    Inclusions      Advisor's or Our inclusion choices
+Press Next, check the settings, press Start. Keep the tab open.
+The Bulk plan table shows Profit, Rough cost and Net profit for each stone.
+
+5. STONES THAT NEED ANOTHER STONE COUNT
+When planning ends, the screen says Waiting for Advisor, and this file appears:
+    F:\autook\bulk-output\resave-needed.csv
+It lists each stone and the stone count it needs.
+
+BY HAND, for each stone on the list:
+  a. Open the stone in Advisor from Stone folder.
+  b. Plan it with that count:
+       1 stone   Makeable
+       2 stones  Best Pair
+       3 stones  Best Pair, then Best Remainder
+  c. Select all the stones in the Results list.
+  d. Use Save As, never plain Save. The folder must be:
+       F:\autook\bulk-output\advisor-resaves
+     The name must be the stone name, -ADV, then the count, for example:
+       1.S525-402-ADV1
+  e. Within about 30 seconds the viewer writes our plan into it and the table updates.
+If Advisor saves into another folder, move the file into advisor-resaves.
+When you finish the list, or to stop for the day, press Stop in the viewer.
+Later, press Fill Advisor saves and choose advisor-resaves to fill what is left.
+
+BY SCRIPT, if you want it automatic later:
+Read BULK-AUTO-PC.md first. Set the folders at the top of
+advisor-automation\advisor-resave-all.ps1, set Load Stone once to the work folder,
+then double-click advisor-resave-all.bat. It has not yet been tested on Advisor.
+Use it on 3 stones first.
+
+6. WHAT YOU GET
+    F:\autook\bulk-output\[stone].adv    one file for each stone
+    F:\autook\bulk-output\bulk-compare.csv    old and new profit, rough cost, net profit
+    F:\autook\bulk-export\[stone].csv    the data file for each stone
+A stone waiting for its re-save holds the best plan its own file can take until it is filled.
+Check some files in Advisor: Polish, Inclusion Projection, no hatched patches.
+
+RULES
+- Originals stay unchanged. Save As only, never plain Save.
+- Do not use Help > License, Tools > Allow Full Access, Tools > Options or proxy settings.
+- Do not change Rough Skin or other Advisor settings.
+- Results are not for marking, sawing or polishing until proven on a real low-value
+  stone and approved in writing.

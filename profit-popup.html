@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stone Profit</title>
+<style>
+:root{--bg:#f4f3ef;--panel:#fff;--ink:#1c1e21;--muted:#696d74;--line:#dfddd6;--accent:#176b87;--good:#14713d;--bad:#b3261e;--warn:#8a5a00;--warnbg:#fbf1da}
+@media (prefers-color-scheme:dark){:root{--bg:#121417;--panel:#1b1e22;--ink:#eceded;--muted:#9fa4ab;--line:#2d3137;--accent:#62b6cf;--good:#62d392;--bad:#ff8a80;--warn:#f0c674;--warnbg:#2f2715}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:20px;margin:0 0 4px}
+h2{font-size:14px;margin:0 0 8px}
+p{margin:0 0 10px}
+.muted{color:var(--muted)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;margin-top:14px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button,.btn{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:7px 12px;cursor:pointer}
+button:hover,.btn:hover{border-color:var(--accent)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.btn input{display:none}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+label.f{display:block;font-size:12px;color:var(--muted)}
+label.f input{display:block;width:100%;margin-top:3px;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+table{border-collapse:collapse;width:100%}
+th,td{padding:5px 4px;border-bottom:1px solid var(--line);text-align:left;font-variant-numeric:tabular-nums}
+th{font-size:11px;color:var(--muted);font-weight:600}
+.n{text-align:right}
+#panel{background:var(--panel);color:var(--ink);padding:12px;font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.name{font-weight:600}
+.profit{font-size:32px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.15}
+.pos{color:var(--good)}.neg{color:var(--bad)}
+.best{font-weight:700}
+.note{background:var(--warnbg);color:var(--warn);padding:7px 9px;border-radius:6px;font-size:12px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap" id="page">
+  <h1>Stone Profit</h1>
+  <p class="muted">Files are read on this computer only. Nothing is uploaded or changed.</p>
+
+  <div class="card">
+    <h2>1. Watch Advisor's saved stones</h2>
+    <div class="row">
+      <button id="pick">Choose stones folder</button>
+      <label class="btn">Open a stone<input id="file" type="file" accept=".adv" multiple></label>
+      <button id="pop">Open small window</button>
+    </div>
+    <p class="muted" id="status" style="margin:8px 0 0">No folder chosen.</p>
+  </div>
+
+  <div id="home" class="card"><div id="panel"></div></div>
+
+  <div class="card">
+    <h2>2. Rates</h2>
+    <div class="grid">
+      <label class="f">Diameter limit (mm)<input id="limit" type="number" step="0.01"></label>
+      <label class="f">Rate below limit (₹ per ct)<input id="small" type="number" step="10"></label>
+      <label class="f">Rate at or above limit (₹ per ct)<input id="large" type="number" step="10"></label>
+      <label class="f">Labour per polished stone (₹)<input id="labour" type="number" step="1"></label>
+      <label class="f">Rough cost per ct (₹)<input id="rough" type="number" step="10"></label>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const MAGIC='ca9b28c7d7ec9b45aabfe4423fef0eff';
+const DEFAULTS={limit:1.25,small:23250,large:13950,labour:70,rough:0};
+const POLL_MS=2000;
+const KEEP_PLANS=8;
+const $=id=>document.getElementById(id);
+const rates=loadRates();
+const history=new Map(); // stone name -> saved plans, newest first
+const seen=new Map();    // file name -> "size:modified"
+let folder=null,latest=null,scanning=false;
+
+function loadRates(){
+  try{return{...DEFAULTS,...JSON.parse(localStorage.getItem('profitRates')||'{}')}}
+  catch{return{...DEFAULTS}}
+}
+function saveRates(){
+  try{localStorage.setItem('profitRates',JSON.stringify(rates))}catch{}
+}
+function findAll(u8,needle){
+  const hits=[];let i=0;
+  while((i=u8.indexOf(needle[0],i))!==-1&&i<=u8.length-needle.length){
+    let k=1;while(k<needle.length&&u8[i+k]===needle[k])k++;
+    if(k===needle.length)hits.push(i);
+    i++;
+  }
+  return hits;
+}
+// Reads the planned stones from a saved .adv file. Advisor's header holds exact polished weights
+// and the plan records hold diameters; heavier stones are paired with larger diameters.
+function readStone(buf,fileName){
+  const u8=new Uint8Array(buf),dv=new DataView(buf);
+  if(u8.length<200)throw new Error('File is too small');
+  const sig=[...u8.subarray(0,16)].map(b=>b.toString(16).padStart(2,'0')).join('');
+  if(sig!==MAGIC)throw new Error('Not an Advisor stone file');
+  const rough=dv.getFloat64(68,true),total=dv.getFloat64(76,true);
+  const weights=[dv.getFloat64(104,true),dv.getFloat64(112,true)].filter(w=>w>0);
+  const rest=total-weights.reduce((a,b)=>a+b,0);
+  if(rest>.0005)weights.push(rest);
+  weights.sort((a,b)=>b-a);
+  const diameters=[];
+  for(const h of findAll(u8,new Uint8Array(new Float64Array([-12345]).buffer))){
+    const q=h-92;
+    if(q<0||diameters.length>=weights.length)continue;
+    const D=dv.getFloat64(q,true);
+    if(!(D>100&&D<6000))continue;
+    const n=[0,1,2].map(i=>dv.getFloat64(q+32+8*i,true));
+    if(Math.abs(n[0]**2+n[1]**2+n[2]**2-1)>1e-3)continue;
+    diameters.push(D/1000);
+  }
+  diameters.sort((a,b)=>b-a);
+  const stones=weights.map((weight,i)=>({weight,diameter:diameters[i]??null}));
+  return{name:fileName.replace(/\.adv$/i,''),rough,total,stones};
+}
+function priceStone(st,r=rates){
+  const known=st.stones.every(x=>x.diameter!==null);
+  const lines=st.stones.map(x=>{
+    const rate=x.diameter===null?0:x.diameter<r.limit?r.small:r.large;
+    return{...x,rate,value:x.weight*rate};
+  });
+  const value=lines.reduce((a,x)=>a+x.value,0),labour=r.labour*lines.length,roughCost=r.rough*st.rough;
+  return{lines,value,labour,roughCost,profit:value-labour-roughCost,known};
+}
+const rs=v=>(v<0?'−₹':'₹')+Math.abs(Math.round(v)).toLocaleString('en-IN');
+const esc=s=>String(s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
+function renderPanel(){
+  const el=$('panel');
+  if(!latest){el.innerHTML='<p class="muted" style="margin:0">Save a plan in Advisor to see its profit here.</p>';return}
+  const p=priceStone(latest),plans=history.get(latest.name)||[],priced=plans.map(x=>priceStone(x.stone).profit),best=Math.max(...priced);
+  el.innerHTML=`
+    <div class="name">${esc(latest.name)}</div>
+    <div class="profit ${p.profit<0?'neg':'pos'}">${rs(p.profit)}</div>
+    <table><thead><tr><th>Dia (mm)</th><th class="n">Weight (ct)</th><th class="n">Rate</th><th class="n">Value</th></tr></thead><tbody>
+    ${p.lines.map(x=>`<tr><td>${x.diameter===null?'?':x.diameter.toFixed(2)}</td><td class="n">${x.weight.toFixed(4)}</td><td class="n">${rs(x.rate)}</td><td class="n">${rs(x.value)}</td></tr>`).join('')}
+    </tbody></table>
+    <p class="muted" style="margin:6px 0 0">Value ${rs(p.value)} − labour ${rs(p.labour)}${rates.rough?` − rough ${rs(p.roughCost)}`:''}</p>
+    ${plans.length>1?`<table style="margin-top:8px"><thead><tr><th>Saved</th><th class="n">Stones</th><th class="n">Polished (ct)</th><th class="n">Profit</th></tr></thead><tbody>
+      ${plans.map((x,i)=>`<tr class="${priced[i]===best?'best':''}"><td>${esc(x.at)}${priced[i]===best?' ★':''}</td><td class="n">${x.stone.stones.length}</td><td class="n">${x.stone.total.toFixed(4)}</td><td class="n">${rs(priced[i])}</td></tr>`).join('')}
+      </tbody></table>`:''}
+    <div class="note">Clarity is not included yet.${p.known?'':' A diameter is missing, so that stone has no value.'}${rates.rough?'':' Rough cost is ₹0.'}</div>`;
+}
+function record(st){
+  const at=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const plans=history.get(st.name)||[];
+  plans.unshift({at,stone:st});
+  plans.length=Math.min(plans.length,KEEP_PLANS);
+  history.set(st.name,plans);
+  latest=st;
+  renderPanel();
+}
+async function loadFile(file){
+  try{
+    record(readStone(await file.arrayBuffer(),file.name));
+    $('status').textContent=`Read ${file.name}`;
+    return true;
+  }catch(e){
+    $('status').textContent=`${file.name}: ${e.message}`;
+    return false;
+  }
+}
+async function scan(first=false){
+  if(!folder||scanning)return;
+  scanning=true;
+  try{
+    for await(const h of folder.values()){
+      if(h.kind!=='file'||!/\.adv$/i.test(h.name))continue;
+      const f=await h.getFile(),stamp=`${f.size}:${f.lastModified}`;
+      if(seen.get(h.name)===stamp)continue;
+      if(first){seen.set(h.name,stamp);continue}
+      // Advisor may still be writing, so a file that cannot be read is tried again next time.
+      if(await loadFile(f))seen.set(h.name,stamp);
+    }
+    if(first)$('status').textContent=`Watching ${folder.name}. Save a plan in Advisor.`;
+  }catch(e){
+    $('status').textContent=`Could not read the folder: ${e.message}`;
+  }
+  scanning=false;
+}
+// A worker keeps the timer running while this tab is in the background.
+const ticker=new Worker(URL.createObjectURL(new Blob([`setInterval(()=>postMessage(0),${POLL_MS})`],{type:'text/javascript'})));
+ticker.onmessage=()=>scan();
+
+$('pick').onclick=async()=>{
+  if(!window.showDirectoryPicker){$('status').textContent='This browser cannot watch a folder. Use Chrome or Microsoft Edge, or Open a stone.';return}
+  try{folder=await window.showDirectoryPicker({mode:'read'});seen.clear();await scan(true)}
+  catch(e){if(e.name!=='AbortError')$('status').textContent=`Could not open the folder: ${e.message}`}
+};
+$('file').onchange=async e=>{for(const f of e.target.files)await loadFile(f);e.target.value=''};
+$('pop').onclick=async()=>{
+  if(!window.documentPictureInPicture){$('status').textContent='This browser cannot keep a window on top. Keep this page beside Advisor.';return}
+  try{
+    const win=await documentPictureInPicture.requestWindow({width:340,height:330});
+    win.document.head.append(...[...document.head.querySelectorAll('style')].map(s=>s.cloneNode(true)));
+    win.document.body.append($('panel'));
+    win.addEventListener('pagehide',()=>$('home').append($('panel')));
+  }catch(e){$('status').textContent=`Could not open the small window: ${e.message}`}
+};
+for(const k of Object.keys(DEFAULTS)){
+  $(k).value=rates[k];
+  $(k).addEventListener('input',()=>{const v=parseFloat($(k).value);if(Number.isFinite(v)){rates[k]=v;saveRates();renderPanel()}});
+}
+renderPanel();
+</script>
+</body>
+</html>
